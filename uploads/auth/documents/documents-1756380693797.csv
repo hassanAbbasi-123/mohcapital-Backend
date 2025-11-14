@@ -1,0 +1,7 @@
+Customer_FirstName,Customer_LastName,Customer_Language,Customer_Email,Customer_Country,Customer_Company,Customer_Address,Customer_Apartment,Customer_city,Customer_PostalCode,Customer_Phone
+John,Doe,English,john.doe@example.com,USA,Acme Corp,123 Main St,Apt 4B,New York,10001,1234567890
+Maria,Gonzalez,Spanish,maria.g@example.com,Spain,GlobalTech,Calle Mayor 5,2A,Madrid,28013,34911222333
+Akira,Tanaka,Japanese,akira.t@example.com,Japan,Nippon Inc,1-2-3 Shibuya,Suite 10,Tokyo,1500002,81312345678
+Fatima,Al-Farsi,Arabic,fatima.f@example.com,UAE,Desert Solutions,Al Wasl Rd,Villa 12,Dubai,00000,971501234567
+Luca,Bianchi,Italian,luca.b@example.com,Italy,RomaTech,Via Roma 45,3rd Floor,Rome,00100,39061234567
+Sophie,Dupont,French,sophie.d@example.com,France,Paris Innov,12 Rue Lafayette,Flat 6,Paris,75009,33112345678
