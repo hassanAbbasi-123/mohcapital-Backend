@@ -12,7 +12,18 @@ connectDB();
 
 const app = express();
 const server = http.createServer(app); // HTTP server wrapped for Socket.IO
-
+app.get("/test-razorpay", async (req, res) => {
+  try {
+    const r = await axios.get("https://api.razorpay.com/v1/checkout/public");
+    return res.json({ ok: true, msg: "Razorpay reachable" });
+  } catch (e) {
+    return res.json({
+      ok: false,
+      msg: "Cannot reach Razorpay from this server",
+      error: e.message
+    });
+  }
+});
 // ✅ Enable CORS (allow frontend http://localhost:3000)
 app.use(
   cors({

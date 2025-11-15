@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const leadController = require("../controllers/leadController");
 const { protect, isAdmin, isSeller } = require("../middleware/authMiddleware");
-
+const axios = require("axios");
 // Apply JWT authentication to ALL lead routes
 router.use(protect);
 
@@ -24,7 +24,24 @@ router.post("/seller/buy/:leadId", isSeller, leadController.buyLead);
 router.get("/seller/purchased", isSeller, leadController.getMyPurchasedLeads);
 
 // ── WEBHOOK ROUTES (No auth needed for webhooks) ───────────
-router.post("/webhook/razorpay", leadController.webhookRazorpay);  // NEW
+router.post("/webhook/razorpay",express.raw({ type: "application/json" }), leadController.webhookRazorpay);  // NEW
 router.post("/webhook/paypal", leadController.webhookPayPal);      // NEW
+
+
+
+
+router.get("/test-razorpay", async (req, res) => {
+  try {
+    const r = await axios.get("https://api.razorpay.com/v1/checkout/public");
+    return res.json({ ok: true, msg: "Razorpay reachable" });
+  } catch (e) {
+    return res.json({
+      ok: false,
+      msg: "Cannot reach Razorpay from this server",
+      error: e.message
+    });
+  }
+});
+
 
 module.exports = router;
