@@ -507,87 +507,86 @@ exports.buyLead = async (req, res) => {
     let orderDetails;
     let orderError = null;
 
-   if (payment_method === "razorpay") {
-  // RAW Axios Razorpay order creation with full logging
-  console.log("🔄 Attempting Razorpay order:", { leadId: lead._id.toString() });
+    if (payment_method === "razorpay") {
+      // RAW Axios Razorpay order creation with full logging
+      console.log("🔄 Attempting Razorpay order:", { leadId: lead._id.toString() });
 
-  console.log("🔎 ENV Check - RAZORPAY_KEY_ID present:", !!process.env.RAZORPAY_KEY_ID);
-  console.log("🔎 ENV Check - RAZORPAY_KEY_SECRET present:", !!process.env.RAZORPAY_KEY_SECRET);
+      console.log("🔎 ENV Check - RAZORPAY_KEY_ID present:", !!process.env.RAZORPAY_KEY_ID);
+      console.log("🔎 ENV Check - RAZORPAY_KEY_SECRET present:", !!process.env.RAZORPAY_KEY_SECRET);
 
-  const rawPrice = lead.lead_price;
-  const parsedPrice = Number(rawPrice);
-  console.log("🔎 Lead price raw:", rawPrice, "parsed:", parsedPrice);
+      const rawPrice = lead.lead_price;
+      const parsedPrice = Number(rawPrice);
+      console.log("🔎 Lead price raw:", rawPrice, "parsed:", parsedPrice);
 
-  if (!isFinite(parsedPrice) || parsedPrice <= 0) {
-    throw new Error(`Invalid lead.lead_price (${rawPrice}). Must be a positive number.`);
-  }
+      if (!isFinite(parsedPrice) || parsedPrice <= 0) {
+        throw new Error(`Invalid lead.lead_price (${rawPrice}). Must be a positive number.`);
+      }
 
-  const amountPaise = Math.round(parsedPrice * 100);
-  if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
-    throw new Error(`Invalid amount in paise (${amountPaise}). Must be a positive integer paise value.`);
-  }
+      const amountPaise = Math.round(parsedPrice * 100);
+      if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
+        throw new Error(`Invalid amount in paise (${amountPaise}). Must be a positive integer paise value.`);
+      }
 
-  console.log("🔎 Amount to send to Razorpay (paise):", amountPaise, "currency: INR");
+      console.log("🔎 Amount to send to Razorpay (paise):", amountPaise, "currency: INR");
 
-  try {
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
-    if (!keyId || !keySecret) {
-      throw new Error("Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in .env");
-    }
-
-    // 🔹 FIXED: Shorten receipt to <=40 chars
-    const shortReceipt = `purchase_${purchase._id.toString().slice(-12)}`;
-
-    const response = await axios({
-      method: 'post',
-      url: 'https://api.razorpay.com/v1/orders',
-      auth: { username: keyId, password: keySecret },
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      data: {
-        amount: amountPaise,
-        currency: 'INR',
-        receipt: shortReceipt, // ✅ Fixed
-        notes: {
-          lead_id: lead._id.toString(),
-          seller_id: req.user._id.toString(),
-          purchase_id: purchase._id.toString()
+      try {
+        const keyId = process.env.RAZORPAY_KEY_ID;
+        const keySecret = process.env.RAZORPAY_KEY_SECRET;
+        if (!keyId || !keySecret) {
+          throw new Error("Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in .env");
         }
-      },
-      timeout: 10000
-    });
 
-    console.log("✅ Razorpay order created via Axios:", response.data.id);
-    const razorpayOrder = response.data;
+        // 🔹 FIXED: Shorten receipt to ≤40 chars
+        const shortReceipt = `purchase_${purchase._id.toString().slice(-12)}`;
 
-    orderDetails = {
-      id: razorpayOrder.id,
-      amount: razorpayOrder.amount,
-      currency: razorpayOrder.currency,
-      key: keyId,
-      name: "Lead Purchase",
-      description: `Purchase lead for ${lead.product}`,
-      handler: "/api/leads/webhook/razorpay",
-      prefill: { name: req.user.name, email: req.user.email }
-    };
-  } catch (rzError) {
-    const errorDetails = {
-      message: rzError.message,
-      status: rzError.response?.status,
-      data: rzError.response?.data || 'Empty body (possible geo-restriction)',
-      code: rzError.code,
-      stack: rzError.stack?.substring(0, 200)
-    };
-    if (rzError.response?.status === 406 || rzError.response?.status === 403) {
-      errorDetails.geoHint = 'Razorpay geo-restriction (India-only). Use PayPal or India-based server for testing.';
-    }
-    console.error("❌ Full Razorpay Axios error:", errorDetails);
-    orderError = rzError;
-  }
+        const response = await axios({
+          method: 'post',
+          url: 'https://api.razorpay.com/v1/orders',
+          auth: { username: keyId, password: keySecret },
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          data: {
+            amount: amountPaise,
+            currency: 'INR',
+            receipt: shortReceipt, // ✅ Fixed
+            notes: {
+              lead_id: lead._id.toString(),
+              seller_id: req.user._id.toString(),
+              purchase_id: purchase._id.toString()
+            }
+          },
+          timeout: 10000 // 10s timeout
+        });
 
+        console.log("✅ Razorpay order created via Axios:", response.data.id);
+        const razorpayOrder = response.data;
+
+        orderDetails = {
+          id: razorpayOrder.id,
+          amount: razorpayOrder.amount,
+          currency: razorpayOrder.currency,
+          key: keyId,
+          name: "Lead Purchase",
+          description: `Purchase lead for ${lead.product}`,
+          handler: "/api/leads/webhook/razorpay",
+          prefill: { name: req.user.name, email: req.user.email }
+        };
+      } catch (rzError) {
+        const errorDetails = {
+          message: rzError.message,
+          status: rzError.response?.status,
+          data: rzError.response?.data || 'Empty body (possible geo-restriction)',
+          code: rzError.code,
+          stack: rzError.stack?.substring(0, 200)
+        };
+        if (rzError.response?.status === 406 || rzError.response?.status === 403) {
+          errorDetails.geoHint = 'Razorpay geo-restriction (India-only). Use PayPal or India-based server for testing.';
+        }
+        console.error("❌ Full Razorpay Axios error:", errorDetails);
+        orderError = rzError;
+      }
     } else if (payment_method === "paypal") {
       try {
         orderDetails = await createPayPalOrder(lead, purchase);
@@ -631,6 +630,7 @@ exports.buyLead = async (req, res) => {
     });
   }
 };
+
 
 // ── SELLER: Get My Purchased Leads ────────────────────────
 exports.getMyPurchasedLeads = async (req, res) => {
