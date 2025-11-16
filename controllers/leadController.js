@@ -7,7 +7,6 @@ const User = require("../models/userModel");
 const mongoose = require("mongoose");
 const axios = require("axios");  // Keep for Razorpay/PayPal
 const crypto = require("crypto");
-
 // CRC32 Polyfill for PayPal webhook verification (Node crypto doesn't support 'crc32')
 function crc32(str) {
   let crc = 0xFFFFFFFF;
@@ -508,7 +507,7 @@ exports.buyLead = async (req, res) => {
     let orderError = null;
 
     if (payment_method === "razorpay") {
-      // FIXED: Raw Axios for Razorpay (bypasses SDK silent errors; full logging)
+      // RAW Axios Razorpay order creation with full logging
       console.log("🔄 Attempting Razorpay order:", { leadId: lead._id.toString() });
 
       console.log("🔎 ENV Check - RAZORPAY_KEY_ID present:", !!process.env.RAZORPAY_KEY_ID);
@@ -536,6 +535,10 @@ exports.buyLead = async (req, res) => {
           throw new Error("Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in .env");
         }
 
+        // GUARANTEED-SHORT RECEIPT: keep it short and unique (max 40 chars, we use 10)
+        const shortReceipt = purchase._id.toString().slice(-10);
+        console.log("🧾 FINAL RECEIPT SENT TO RAZORPAY:", shortReceipt, "length:", shortReceipt.length);
+
         const response = await axios({
           method: 'post',
           url: 'https://api.razorpay.com/v1/orders',
@@ -547,14 +550,14 @@ exports.buyLead = async (req, res) => {
           data: {
             amount: amountPaise,
             currency: 'INR',
-            receipt: `lead_${lead._id}_seller_${req.user._id}`,
+            receipt: shortReceipt,
             notes: {
               lead_id: lead._id.toString(),
               seller_id: req.user._id.toString(),
               purchase_id: purchase._id.toString()
             }
           },
-          timeout: 10000  // 10s timeout for Render
+          timeout: 10000 // 10s timeout
         });
 
         console.log("✅ Razorpay order created via Axios:", response.data.id);
@@ -571,7 +574,6 @@ exports.buyLead = async (req, res) => {
           prefill: { name: req.user.name, email: req.user.email }
         };
       } catch (rzError) {
-        // FIXED: Full Axios error logging (no silent undefined)
         const errorDetails = {
           message: rzError.message,
           status: rzError.response?.status,
@@ -580,7 +582,7 @@ exports.buyLead = async (req, res) => {
           stack: rzError.stack?.substring(0, 200)
         };
         if (rzError.response?.status === 406 || rzError.response?.status === 403) {
-          errorDetails.geoHint = 'Razorpay geo-restriction (India-only for full access). Switch to PayPal or use VPN (India server) for local testing.';
+          errorDetails.geoHint = 'Razorpay geo-restriction (India-only). Use PayPal or India-based server for testing.';
         }
         console.error("❌ Full Razorpay Axios error:", errorDetails);
         orderError = rzError;
@@ -628,6 +630,10 @@ exports.buyLead = async (req, res) => {
     });
   }
 };
+
+
+
+
 
 // ── SELLER: Get My Purchased Leads ────────────────────────
 exports.getMyPurchasedLeads = async (req, res) => {
@@ -824,138 +830,89 @@ exports.getLeadAnalytics = async (req, res) => {
 // ── WEBHOOK: Razorpay Payment Verification ────────────────
 exports.webhookRazorpay = async (req, res) => {
   try {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || "";
-    const body = req.body;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const rawBody = req.body.toString("utf8");
     const receivedSignature = req.headers["x-razorpay-signature"];
 
-    console.log("🔔 Razorpay webhook received. headers:", {
-      signature: !!receivedSignature,
-      webhookSecretPresent: !!webhookSecret
-    });
+    console.log("🔔 Razorpay webhook hit");
 
     if (!webhookSecret) {
-      console.warn("⚠️ RAZORPAY_WEBHOOK_SECRET missing from env. Skipping signature validation (not recommended).");
+      console.log("⚠️ Missing webhook secret");
+      return res.status(400).send("Missing webhook secret");
     }
 
-    if (webhookSecret) {
-      let expectedSignature;
-      try {
-        expectedSignature = crypto
-          .createHmac("sha256", webhookSecret)
-          .update(body)
-          .digest("hex");
-      } catch (sigErr) {
-        console.error("❌ Error computing expected signature:", sigErr);
-        return res.status(400).send("Signature computation error");
-      }
+    const expectedSignature = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(rawBody)
+      .digest("hex");
 
-      if (receivedSignature !== expectedSignature) {
-        console.log("❌ Invalid webhook signature", { receivedSignature, expectedSignature });
-        return res.status(400).send("Invalid signature");
-      }
+    if (expectedSignature !== receivedSignature) {
+      console.log("❌ Invalid webhook signature");
+      return res.status(400).send("Invalid signature");
     }
 
+    // Parse raw JSON
     let data;
     try {
-      data = typeof body === "string" ? JSON.parse(body) : body;
-    } catch (parseErr) {
-      console.error("❌ Failed to parse webhook body:", parseErr);
-      return res.status(400).send("Invalid payload");
+      data = JSON.parse(rawBody);
+    } catch (e) {
+      console.log("❌ Invalid webhook JSON");
+      return res.status(400).send("Invalid JSON");
     }
 
     const event = data.event;
-    const paymentEntity = data.payload?.payment?.entity;
+    const payment = data.payload?.payment?.entity;
 
     if (event === "payment.captured") {
-      const paymentId = paymentEntity.id;
+      const paymentId = payment.id;
 
       const purchase = await LeadPurchase.findOne({
         payment_id: paymentId,
-        payment_status: "pending",
         payment_mode: "razorpay"
-      }).populate({
-        path: "lead",
-        populate: { path: "buyer", select: "name" }
-      }).populate("seller", "name");
+      });
 
       if (!purchase) {
-        console.warn("⚠️ Purchase not found for payment ID:", paymentId);
-        return res.status(404).json({ message: "Purchase not found" });
+        console.log("⚠️ No purchase found");
+        return res.status(404).send("Purchase not found");
       }
 
       purchase.payment_status = "approved";
-      purchase.payment_response = paymentEntity;
       purchase.approved_at = new Date();
+      purchase.payment_response = payment;
       await purchase.save();
 
-      const lead = purchase.lead;
+      // Update lead sold_count
+      const lead = await Lead.findById(purchase.lead);
       lead.sold_count += 1;
       if (lead.sold_count >= lead.max_sellers) {
         lead.status = "sold";
       }
       await lead.save();
 
-      console.log("✅ DB updates complete, starting chat...");
-      try {
-        let conversation = await Conversation.findOne({
-          participants: { $all: [lead.buyer._id, purchase.seller._id] }
-        });
-
-        if (!conversation) {
-          conversation = new Conversation({
-            buyer: lead.buyer._id,
-            seller: purchase.seller._id,
-            participants: [lead.buyer._id, purchase.seller._id],
-            lead: lead._id
-          });
-          await conversation.save();
-          console.log("✅ Conversation created:", conversation._id);
-        }
-
-        await new Message({
-          conversation: conversation._id,
-          sender: null,
-          type: "system",
-          text: `🎉 Lead purchase successful via Razorpay! Seller ${purchase.seller.name} has purchased the lead.`
-        }).save();
-        console.log("✅ System message saved");
-
-        if (lead.allow_sellers_contact) {
-          await new Message({
-            conversation: conversation._id,
-            sender: null,
-            type: "system",
-            text: `📞 Buyer Contact:\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`
-          }).save();
-          console.log("✅ Contact message saved");
-        }
-      } catch (chatError) {
-        console.error("❌ Chat creation failed (non-critical):", chatError.message);
-      }
-
-      console.log("✅ Razorpay payment captured:", paymentId);
+      console.log("🎉 Payment captured:", paymentId);
     }
 
     if (event === "payment.failed") {
-      const paymentId = paymentEntity.id;
+      const paymentId = payment.id;
 
-      const purchase = await LeadPurchase.findOne({ payment_id: paymentId });
+      await LeadPurchase.findOneAndUpdate(
+        { payment_id: paymentId },
+        {
+          payment_status: "failed",
+          payment_response: payment
+        }
+      );
 
-      if (purchase) {
-        purchase.payment_status = "failed";
-        purchase.payment_response = paymentEntity;
-        await purchase.save();
-      }
-
-      console.log("❌ Razorpay payment failed:", paymentId);
+      console.log("❌ Payment failed:", paymentId);
     }
 
     return res.status(200).send("OK");
   } catch (error) {
-    console.error("❌ Error in Razorpay webhook:", error);
+    console.error("❌ Webhook error:", error);
     return res.status(500).send("Server error");
   }
 };
+
 
 // ── WEBHOOK: PayPal Payment Verification ──────────────────
 exports.webhookPayPal = async (req, res) => {
