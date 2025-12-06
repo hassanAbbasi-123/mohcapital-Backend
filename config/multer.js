@@ -1,4 +1,3 @@
-// config/multer.js
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -13,8 +12,18 @@ const storage = multer.diskStorage({
     const base = "uploads";
     let folder = `${base}/others`;
 
+    // LEADS - For payment proofs
+    if (req.baseUrl.includes("/leads")) {
+      if (file.fieldname === "payment_proof") {
+        folder = `${base}/leads/payment-proofs`;
+        console.log("📁 Setting payment proof upload directory:", folder);
+      } else {
+        folder = `${base}/leads`;
+      }
+    }
+
     // AUTH
-    if (req.baseUrl.includes("/auth")) {
+    else if (req.baseUrl.includes("/auth")) {
       if (file.fieldname === "logo") folder = `${base}/auth/logos`;
       else if (file.fieldname === "documents") folder = `${base}/auth/documents`;
       else folder = `${base}/auth`;
@@ -56,31 +65,53 @@ const storage = multer.diskStorage({
         folder = `${base}/others/images`;
       } else if (file.fieldname === "gallery") {
         folder = `${base}/others/gallery`;
+      } else if (file.fieldname === "payment_proof") {
+        folder = `${base}/leads/payment-proofs`;
       }
     }
 
+    // Ensure directory exists
     ensureDir(folder);
+    console.log("✅ Uploading to directory:", folder);
     cb(null, folder);
   },
 
   filename: (req, file, cb) => {
-    cb(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
+    // Custom filename for payment proofs
+    if (file.fieldname === "payment_proof") {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const ext = path.extname(file.originalname);
+      const filename = `payment-proof-${uniqueSuffix}${ext}`;
+      console.log("📁 Generated filename for payment proof:", filename);
+      cb(null, filename);
+    } else {
+      cb(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
+    }
   }
 });
 
 const fileFilter = (req, file, cb) => {
   const allowed = /jpeg|jpg|png|gif|pdf|mp4|csv|doc|docx/;
   const ext = path.extname(file.originalname).toLowerCase();
+  
+  console.log("📁 File upload attempt:", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+    extension: ext
+  });
+  
   if (allowed.test(ext) && allowed.test(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error("Invalid file type"));
+    console.error("❌ Invalid file type:", { ext, mimetype: file.mimetype });
+    cb(new Error("Invalid file type. Only JPEG, PNG, GIF, PDF, MP4, CSV, DOC, DOCX are allowed."));
   }
 };
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter
 });
 
@@ -104,13 +135,14 @@ const authUpload = upload.fields([
   { name: "documents", maxCount: 5 }
 ]);
 
+// NEW: For leads payment proofs
+const paymentProofUpload = upload.single("payment_proof");
+
 // === EXPORTS ===
-// Keep old way (for brandRoutes, etc.)
 module.exports = upload;
 module.exports.upload = upload;
-
-// Named exports (new)
 module.exports.productUpload = productUpload;
 module.exports.profileUpload = profileUpload;
 module.exports.profilePictureUpload = profilePictureUpload;
 module.exports.authUpload = authUpload;
+module.exports.paymentProofUpload = paymentProofUpload;

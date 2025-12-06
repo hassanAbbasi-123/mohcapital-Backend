@@ -6,10 +6,6 @@ const {upload,productUpload } = require("../config/multer"); // ✅ multer insta
 const { protect, isAdmin, isSeller,optionalAuth } = require("../middleware/authMiddleware");
 const productController = require("../controllers/productController");
 
-
-
-// router.get("/get-products-by-slug/:slug", productController.getProductBySlug);
-
 //  ADMIN ROUTES
 // Get all products
 router.get(

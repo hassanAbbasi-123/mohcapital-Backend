@@ -10,13 +10,6 @@ const productSchema = new mongoose.Schema(
       required: true
     },
 
-    // 👇 Product belongs to a brand
-    brand: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Brand",
-      required: true
-    },
-
     // 👇 Product is owned by a vendor (seller)
     seller: {
       type: mongoose.Schema.Types.ObjectId,
@@ -72,7 +65,6 @@ const productSchema = new mongoose.Schema(
 
     // ✅ Coupons applied
     coupons: [{ type: mongoose.Schema.Types.ObjectId, ref: "Coupon" }],
-
 
     lowStockThreshold: { type: Number, default: 10 }, 
     lastStockUpdate: { type: Date },                   

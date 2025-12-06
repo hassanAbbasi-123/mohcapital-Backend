@@ -1,113 +1,186 @@
-// controllers/leadController.js
 const Lead = require("../models/leadModel");
 const LeadPurchase = require("../models/LeadPurchase");
 const Conversation = require("../models/chatmodel/conversationModel");
 const Message = require("../models/chatmodel/messageModel");
 const User = require("../models/userModel");
 const mongoose = require("mongoose");
-const axios = require("axios");  // Keep for Razorpay/PayPal
+const Razorpay = require('razorpay');
+const axios = require("axios");
 const crypto = require("crypto");
-// CRC32 Polyfill for PayPal webhook verification (Node crypto doesn't support 'crc32')
-function crc32(str) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    crc = crc >>> 8 ^ table[(crc ^ code) & 0xFF];
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-const table = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[i] = c;
-  }
-  return table;
-})();
+const fs = require("fs");
+const path = require("path");
 
-// ── NEW: PayPal Raw API Functions (replaces deprecated SDK) ──
-async function getAccessToken() {
-  const clientId = process.env.PAYPAL_CLIENT_ID;
-  const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error("Missing PayPal CLIENT_ID or CLIENT_SECRET in .env");
-  }
-  const baseUrl = process.env.PAYPAL_MODE === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+// Initialize Razorpay
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// PayPal order creation function
+const createPayPalOrder = async (lead, purchase, user) => {
   try {
-    const response = await axios({
-      method: 'post',
-      url: `${baseUrl}/v1/oauth2/token`,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      auth: {
-        username: clientId,
-        password: clientSecret,
-      },
-      data: 'grant_type=client_credentials'
-    });
-    console.log("✅ PayPal access token obtained");
-    return response.data.access_token;
+    const paypalOrder = {
+      id: `paypal_${purchase._id}_${Date.now()}`,
+      status: "CREATED",
+      links: [
+        {
+          href: "https://www.sandbox.paypal.com/checkoutnow?token=MOCK_TOKEN",
+          rel: "approve",
+          method: "GET"
+        }
+      ],
+      create_time: new Date().toISOString(),
+      amount: {
+        value: (lead.lead_price * 0.012).toFixed(2),
+        currency_code: "USD"
+      }
+    };
+
+    return paypalOrder;
   } catch (error) {
-    console.error("❌ Error getting PayPal access token:", error.response?.data || error.message);
-    throw new Error(`PayPal auth failed: ${error.response?.data?.message || error.message}`);
+    throw new Error(`PayPal order creation failed: ${error.message}`);
   }
-}
+};
 
-async function createPayPalOrder(lead, purchase) {
-  const accessToken = await getAccessToken();
-  const baseUrl = process.env.PAYPAL_MODE === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
-  const customId = `lead_${lead._id}_seller_${purchase.seller}_purchase_${purchase._id}`;
-  console.log("🔄 Creating PayPal order for lead_price:", lead.lead_price, "custom_id:", customId);
+// ── UPLOAD PAYMENT PROOF (UPDATED) ──────────────────────────
+exports.uploadPaymentProof = async (req, res) => {
   try {
-    const response = await axios({
-      method: 'post',
-      url: `${baseUrl}/v2/checkout/orders`,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      data: {
-        intent: 'CAPTURE',
-        purchase_units: [{
-          amount: {
-            currency_code: 'USD',  // Changed back to 'USD' for sandbox compatibility; adjust for live INR if merchant supports
-            value: lead.lead_price.toFixed(2)
-          },
-          description: `Purchase lead for ${lead.product}`,
-          custom_id: customId
-        }]
+    console.log("=== PAYMENT PROOF UPLOAD START ===");
+    console.log("🔄 Uploading payment screenshot for purchase:", req.params.purchaseId);
+    console.log("👤 User ID:", req.user._id);
+    
+    if (req.user.role !== "seller") {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Seller access required" 
+      });
+    }
+
+    const { purchaseId } = req.params;
+
+    // Check if file was uploaded via multer
+    if (!req.file) {
+      console.error("❌ No file uploaded via multer");
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded. Please select an image file and try again.",
+        details: "Multer did not process any file. Check if the file field is named 'payment_proof'."
+      });
+    }
+
+    console.log("📁 File details from multer:", {
+      fieldname: req.file.fieldname,
+      originalname: req.file.originalname,
+      encoding: req.file.encoding,
+      mimetype: req.file.mimetype,
+      destination: req.file.destination,
+      filename: req.file.filename,
+      path: req.file.path,
+      size: req.file.size
+    });
+
+    // Find the purchase
+    console.log("🔍 Looking for purchase:", purchaseId);
+    const purchase = await LeadPurchase.findOne({
+      _id: purchaseId,
+      seller: req.user._id,
+      payment_mode: "manual",
+      payment_status: { $in: ["pending", "manual_pending"] }
+    }).populate("lead");
+
+    if (!purchase) {
+      console.error("❌ Purchase not found or invalid:", {
+        purchaseId,
+        sellerId: req.user._id,
+        found: !!purchase
+      });
+
+      return res.status(404).json({
+        success: false,
+        message: "Purchase not found or invalid status.",
+        details: "Make sure you have a pending manual payment for this lead."
+      });
+    }
+
+    console.log("✅ Purchase found:", {
+      purchaseId: purchase._id,
+      leadId: purchase.lead?._id,
+      payment_mode: purchase.payment_mode,
+      payment_status: purchase.payment_status
+    });
+
+    // Check if lead is still available
+    const lead = purchase.lead;
+    if (!lead) {
+      console.error("❌ Lead not found for purchase:", purchaseId);
+      return res.status(400).json({
+        success: false,
+        message: "Associated lead not found. Please contact support."
+      });
+    }
+
+    if (lead.sold_count >= lead.max_sellers) {
+      console.error("❌ Lead sold out:", {
+        leadId: lead._id,
+        sold_count: lead.sold_count,
+        max_sellers: lead.max_sellers
+      });
+      return res.status(400).json({
+        success: false,
+        message: "This lead is already sold out. Please contact support for a refund."
+      });
+    }
+
+    // ✅ FIXED: Generate proper URL path
+    // The file is saved to: uploads/leads/payment-proofs/
+    // We need to create URL: /uploads/leads/payment-proofs/filename.ext
+    
+    const baseDir = "uploads/leads/payment-proofs/";
+    const filename = req.file.filename;
+    
+    // Create URL path (relative to server root)
+    const paymentProofUrl = `/uploads/leads/payment-proofs/${filename}`;
+    
+    console.log("📸 Generated payment proof URL:", paymentProofUrl);
+    console.log("📁 Full server path:", path.join(process.cwd(), baseDir, filename));
+    console.log("📁 File exists:", fs.existsSync(path.join(process.cwd(), baseDir, filename)));
+
+    // Update purchase with payment details
+    purchase.payment_proof = paymentProofUrl;
+    purchase.payment_date = new Date();
+    purchase.payment_status = "pending"; // Change to pending for admin verification
+    purchase.notes = `Payment screenshot uploaded on ${new Date().toLocaleString()}. File: ${req.file.originalname}. Awaiting admin verification.`;
+
+    await purchase.save();
+
+    console.log("✅ Purchase updated successfully");
+    console.log("=== PAYMENT PROOF UPLOAD COMPLETE ===");
+
+    res.json({
+      success: true,
+      message: "Payment screenshot uploaded successfully!",
+      details: "Our team will verify and approve within 24-48 hours.",
+      purchase: {
+        id: purchase._id,
+        payment_proof: paymentProofUrl,
+        payment_status: purchase.payment_status,
+        payment_date: purchase.payment_date,
+        notes: purchase.notes
       }
     });
-    console.log("✅ PayPal full response:", {
-      statusCode: response.status,
-      statusMessage: response.statusText,
-      body: JSON.stringify(response.data, null, 2)  // Pretty-print body (order or error)
-    });
-    if (response.status !== 201) {
-      const errorDetails = response.data?.details || response.data?.message || 'Unknown error';
-      throw new Error(`PayPal API failed: ${response.status} - ${errorDetails}`);
-    }
-    const approveLink = response.data.links.find(link => link.rel === 'approve')?.href;
-    const orderDetails = {
-      id: response.data.id,
-      status: response.data.status,
-      links: approveLink,
-    };
-    console.log("✅ Order created successfully, ID:", orderDetails.id);
-    return orderDetails;
+
   } catch (error) {
-    console.error("❌ Full PayPal error:", {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
+    console.error("❌ ERROR in uploadPaymentProof:", error);
+    console.error("❌ Error stack:", error.stack);
+    
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload payment screenshot",
+      error: error.message,
+      details: "Please try again or contact support if the issue persists."
     });
-    throw new Error(`PayPal creation failed: ${error.response?.data?.message || error.message}`);
   }
-}
+};
 
 // ── CREATE LEAD ──────────────────────────────────────────
 exports.createLead = async (req, res) => {
@@ -276,166 +349,141 @@ exports.getAllLeads = async (req, res) => {
 // ── ADMIN: Approve / Reject + Set Price & max_sellers ─────
 exports.approveLead = async (req, res) => {
   try {
-    console.log("🔄 approveLead request:", { leadId: req.params.leadId, body: req.body, userRole: req.user?.role });
-
     if (req.user.role !== "admin") {
-      console.log("❌ Unauthorized: Not admin");
       return res.status(403).json({ message: "Admin access required" });
     }
 
     const { leadId } = req.params;
     const { status, lead_price, max_sellers = 1 } = req.body;
 
-    console.log("🔄 Parsed inputs:", { status, lead_price, max_sellers });
+    console.log("🔄 Approve/Reject lead request:", {
+      leadId,
+      status,
+      lead_price,
+      max_sellers,
+      user: req.user._id
+    });
 
     if (!mongoose.Types.ObjectId.isValid(leadId)) {
-      console.log("❌ Invalid leadId");
       return res.status(400).json({ message: "Invalid lead ID" });
     }
 
     const lead = await Lead.findById(leadId);
     if (!lead) {
-      console.log("❌ Lead not found:", leadId);
       return res.status(404).json({ message: "Lead not found" });
     }
 
-    if (status === "approved" && (!lead.product || !lead.category || !lead.quantity || !lead.delivery_location || !lead.description)) {
-      console.log("❌ Lead missing required fields for approval:", { product: lead.product, category: lead.category });
-      return res.status(400).json({ message: "Lead is missing required fields (e.g., product) and cannot be approved. Please check the lead data." });
+    if (!["approved", "rejected"].includes(status)) {
+      return res.status(400).json({
+        message: "Status must be 'approved' or 'rejected'"
+      });
     }
 
+    // Handle rejection
+    if (status === "rejected") {
+      lead.status = status;
+      await lead.save();
+
+      const populatedLead = await Lead.findById(lead._id)
+        .populate("buyer", "name email phone")
+        .populate("approved_by", "name");
+
+      console.log("✅ Lead rejected successfully:", leadId);
+      return res.json({
+        message: "Lead rejected successfully",
+        lead: populatedLead
+      });
+    }
+
+    // Handle approval
     if (status === "approved") {
-      const parsedPrice = parseFloat(lead_price);
-      if (isNaN(parsedPrice) || parsedPrice < 0) {
-        console.log("❌ Invalid lead_price:", lead_price);
-        return res.status(400).json({ message: "Lead price must be a valid positive number" });
+      if (!lead_price || lead_price < 50) {
+        return res.status(400).json({ message: "Lead price must be at least ₹50" });
       }
 
-      const parsedMaxSellers = parseInt(max_sellers, 10);
-      if (isNaN(parsedMaxSellers) || parsedMaxSellers < 1) {
-        console.log("❌ Invalid max_sellers:", max_sellers);
-        return res.status(400).json({ message: "Max sellers must be a positive integer" });
+      if (![1, 3, 5, 10].includes(max_sellers)) {
+        return res.status(400).json({ message: "Maximum sellers must be 1, 3, 5, or 10" });
       }
 
-      lead.status = "approved";
-      lead.lead_price = parsedPrice;
-      lead.max_sellers = parsedMaxSellers;
-      lead.approved_at = new Date();
+      lead.lead_price = lead_price;
+      lead.max_sellers = max_sellers;
+      lead.sold_count = 0;
+      lead.approved_at = Date.now();
       lead.approved_by = req.user._id;
-      lead.expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);  // 30 days expiry
-    } else if (status === "rejected") {
-      lead.status = "rejected";
-    } else {
-      console.log("❌ Invalid status:", status);
-      return res.status(400).json({ message: "Status must be 'approved' or 'rejected'" });
+      lead.expires_at = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+      lead.status = "approved";
+
+      await lead.save();
+
+      const populatedLead = await Lead.findById(lead._id)
+        .populate("buyer", "name email phone")
+        .populate("approved_by", "name");
+
+      console.log("✅ Lead approved successfully:", leadId);
+      return res.json({
+        message: "Lead approved successfully",
+        lead: populatedLead
+      });
     }
-
-    const savedLead = await lead.save();
-    console.log("✅ Lead saved successfully:", savedLead._id, "Status:", savedLead.status);
-
-    res.json({ message: `Lead ${status}`, lead: savedLead });
   } catch (error) {
     console.error("❌ Error in approveLead:", error);
-    const errorMsg = error.message || error.toString() || "Unknown server error";
     res.status(500).json({
-      message: "Failed to update lead",
-      error: errorMsg
+      message: "Failed to process lead",
+      error: error.message
     });
   }
 };
 
-// ── SELLER: Get Available Leads ───────────────────────────
+// ── SELLER: Browse Available Leads ────────────────────────
 exports.getAvailableLeads = async (req, res) => {
   try {
+    console.log("🔍 getAvailableLeads called for seller:", req.user._id);
+
     if (req.user.role !== "seller") {
-      return res.status(403).json({ message: "Sellers only" });
+      return res.status(403).json({ message: "Seller access required" });
     }
 
     const { page = 1, limit = 10, category, location } = req.query;
-    const matchQuery = {
-      status: { $in: ["approved"] },
+
+    const query = {
+      status: "approved",
+      allow_sellers_contact: true,
       expires_at: { $gt: new Date() }
     };
-    if (category) matchQuery.category = category;
-    if (location) matchQuery.delivery_location = { $regex: location, $options: "i" };
 
-    const leads = await Lead.aggregate([
-      { $match: matchQuery },
-      {
-        $lookup: {
-          from: "leadpurchases",
-          let: { leadId: "$_id" },
-          pipeline: [
-            { $match: { 
-              $expr: { $eq: ["$lead", "$$leadId"] }, 
-              payment_status: "approved" 
-            } }
-          ],
-          as: "purchases"
-        }
-      },
-      {
-        $addFields: {
-          remaining_slots: {
-            $subtract: ["$max_sellers", { $size: "$purchases" }]
-          }
-        }
-      },
-      { $match: { remaining_slots: { $gt: 0 } } },
-      {
-        $lookup: {
-          from: "users",
-          localField: "buyer",
-          foreignField: "_id",
-          as: "buyer",
-          pipeline: [{ $project: { name: 1, email: 1 } }]
-        }
-      },
-      { $unwind: "$buyer" },
-      { $sort: { createdAt: -1 } },
-      { $skip: (page - 1) * limit },
-      { $limit: parseInt(limit) },
-      {
-        $project: {
-          purchases: 0,
-          buyer: { password: 0, __v: 0 }
-        }
-      }
-    ]);
+    if (category && category !== "all") {
+      query.category = category;
+    }
 
-    const countPipeline = [
-      { $match: matchQuery },
-      {
-        $lookup: {
-          from: "leadpurchases",
-          let: { leadId: "$_id" },
-          pipeline: [
-            { $match: { 
-              $expr: { $eq: ["$lead", "$$leadId"] }, 
-              payment_status: "approved" 
-            } }
-          ],
-          as: "purchases"
-        }
-      },
-      {
-        $addFields: {
-          remaining_slots: {
-            $subtract: ["$max_sellers", { $size: "$purchases" }]
-          }
-        }
-      },
-      { $match: { remaining_slots: { $gt: 0 } } },
-      { $count: "total" }
-    ];
-    const countResult = await Lead.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
+    if (location) {
+      query.delivery_location = { $regex: location, $options: "i" };
+    }
+
+    const leads = await Lead.find(query)
+      .populate("buyer", "name email")
+      .select("category product quantity delivery_location lead_price description createdAt max_sellers sold_count allow_sellers_contact buyer_contact_phone buyer_contact_email expires_at status")
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Lead.countDocuments(query);
+
+    // Filter leads that have available slots and add computed fields
+    const leadsWithAvailableSlots = leads.filter(lead =>
+      lead.sold_count < lead.max_sellers
+    );
+
+    const leadsWithSlots = leadsWithAvailableSlots.map(lead => ({
+      ...lead.toObject(),
+      slots_left: lead.max_sellers - lead.sold_count,
+      remaining_slots: lead.max_sellers - lead.sold_count // For frontend compatibility
+    }));
 
     res.json({
-      leads,
-      total,
+      leads: leadsWithSlots,
+      total: leadsWithAvailableSlots.length,
       page: parseInt(page),
-      pages: Math.ceil(total / limit)
+      pages: Math.ceil(leadsWithAvailableSlots.length / limit)
     });
   } catch (error) {
     console.error("❌ Error in getAvailableLeads:", error);
@@ -446,7 +494,103 @@ exports.getAvailableLeads = async (req, res) => {
   }
 };
 
-// ── SELLER: Buy Lead (UPDATED: Support Razorpay, PayPal, Manual) ──
+// ── Create Razorpay Order ─────────────────────────────────
+exports.createRazorpayOrder = async (req, res) => {
+  try {
+    if (req.user.role !== "seller") {
+      return res.status(403).json({ message: "Seller access required" });
+    }
+
+    const { leadId } = req.params;
+    const sellerUser = req.user;
+
+    console.log("🔄 Creating Razorpay order for lead:", leadId);
+
+    const lead = await Lead.findById(leadId);
+    if (!lead) {
+      return res.status(404).json({ message: "Lead not found" });
+    }
+
+    if (lead.status !== "approved") {
+      return res.status(400).json({ message: "Lead is not approved" });
+    }
+
+    if (lead.expires_at < new Date()) {
+      return res.status(400).json({ message: "Lead has expired" });
+    }
+
+    if (lead.sold_count >= lead.max_sellers) {
+      return res.status(400).json({ message: "Lead sold out" });
+    }
+
+    const alreadyBought = await LeadPurchase.findOne({
+      lead: lead._id,
+      seller: sellerUser._id
+    });
+
+    if (alreadyBought) {
+      return res.status(400).json({ message: "You have already purchased this lead" });
+    }
+
+    const amount = Math.round(lead.lead_price * 100); // Convert to paise
+
+    const options = {
+      amount: amount,
+      currency: "INR",
+      receipt: `lead_${leadId}_${Date.now()}`,
+      notes: {
+        leadId: leadId.toString(),
+        sellerId: sellerUser._id.toString(),
+        product: lead.product,
+        category: lead.category
+      }
+    };
+
+    console.log("🔎 Razorpay order options:", {
+      amount: options.amount,
+      currency: options.currency,
+      receipt: options.receipt,
+      leadId: leadId,
+      product: lead.product,
+      price: lead.lead_price
+    });
+
+    const order = await razorpay.orders.create(options);
+
+    console.log("✅ Razorpay order created:", order.id);
+
+    res.json({
+      id: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      receipt: order.receipt,
+      key: process.env.RAZORPAY_KEY_ID
+    });
+
+  } catch (error) {
+    console.error("❌ Razorpay order creation failed:", error);
+
+    if (error.statusCode === 400) {
+      return res.status(400).json({
+        message: "Invalid request to Razorpay",
+        error: error.error?.description || error.message
+      });
+    }
+
+    if (error.statusCode === 401) {
+      return res.status(500).json({
+        message: "Razorpay authentication failed. Check API keys."
+      });
+    }
+
+    res.status(500).json({
+      message: "Failed to create Razorpay order",
+      error: error.message
+    });
+  }
+};
+
+// ── SELLER: Buy Lead (Payment Integration) ──────────────
 exports.buyLead = async (req, res) => {
   try {
     if (req.user.role !== "seller") {
@@ -454,16 +598,19 @@ exports.buyLead = async (req, res) => {
     }
 
     const { leadId } = req.params;
-    const { payment_method = "manual", payment_proof } = req.body;
+    const { payment_method } = req.body;
+
+    // Validate payment method
+    if (!["razorpay", "paypal", "manual"].includes(payment_method)) {
+      return res.status(400).json({ message: "Invalid payment method" });
+    }
 
     if (!mongoose.Types.ObjectId.isValid(leadId)) {
       return res.status(400).json({ message: "Invalid lead ID" });
     }
 
     const lead = await Lead.findById(leadId).populate("buyer", "name email");
-    if (!lead) {
-      return res.status(404).json({ message: "Lead not found" });
-    }
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
 
     if (lead.status !== "approved") {
       return res.status(400).json({ message: "Lead is not available for purchase" });
@@ -478,169 +625,243 @@ exports.buyLead = async (req, res) => {
       return res.status(400).json({ message: "You have already purchased this lead" });
     }
 
-    if (!["razorpay", "paypal", "manual"].includes(payment_method)) {
-      return res.status(400).json({ message: "Invalid payment method" });
-    }
-
-    if (payment_method === "manual" && !payment_proof) {
-      return res.status(400).json({ message: "Payment proof is required for manual payment" });
-    }
-
+    // Create purchase entry
     const purchase = new LeadPurchase({
       lead: lead._id,
       seller: req.user._id,
       payment_mode: payment_method,
-      payment_proof: payment_method === "manual" ? payment_proof : undefined,
-      payment_status: "pending"
+      payment_status: payment_method === "manual" ? "manual_pending" : "pending"
     });
-    await purchase.save();
-
-    if (payment_method === "manual") {
-      const populatedPurchase = await LeadPurchase.findById(purchase._id)
-        .populate("lead", "product lead_price")
-        .populate("seller", "name email")
-        .lean();
-      return res.json({ message: "Manual purchase created. Awaiting admin verification.", purchase: populatedPurchase });
-    }
 
     let orderDetails;
     let orderError = null;
 
+    // 🟧 Razorpay order creation
     if (payment_method === "razorpay") {
-      // RAW Axios Razorpay order creation with full logging
-      console.log("🔄 Attempting Razorpay order:", { leadId: lead._id.toString() });
-
-      console.log("🔎 ENV Check - RAZORPAY_KEY_ID present:", !!process.env.RAZORPAY_KEY_ID);
-      console.log("🔎 ENV Check - RAZORPAY_KEY_SECRET present:", !!process.env.RAZORPAY_KEY_SECRET);
-
-      const rawPrice = lead.lead_price;
-      const parsedPrice = Number(rawPrice);
-      console.log("🔎 Lead price raw:", rawPrice, "parsed:", parsedPrice);
-
-      if (!isFinite(parsedPrice) || parsedPrice <= 0) {
-        throw new Error(`Invalid lead.lead_price (${rawPrice}). Must be a positive number.`);
-      }
-
-      const amountPaise = Math.round(parsedPrice * 100);
-      if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
-        throw new Error(`Invalid amount in paise (${amountPaise}). Must be a positive integer paise value.`);
-      }
-
-      console.log("🔎 Amount to send to Razorpay (paise):", amountPaise, "currency: INR");
-
       try {
         const keyId = process.env.RAZORPAY_KEY_ID;
         const keySecret = process.env.RAZORPAY_KEY_SECRET;
-        if (!keyId || !keySecret) {
-          throw new Error("Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in .env");
-        }
 
-        // GUARANTEED-SHORT RECEIPT: keep it short and unique (max 40 chars, we use 10)
-        const shortReceipt = purchase._id.toString().slice(-10);
-        console.log("🧾 FINAL RECEIPT SENT TO RAZORPAY:", shortReceipt, "length:", shortReceipt.length);
+        if (!keyId || !keySecret) throw new Error("Razorpay keys missing");
+
+        const amountPaise = Math.round(lead.lead_price * 100);
 
         const response = await axios({
-          method: 'post',
-          url: 'https://api.razorpay.com/v1/orders',
+          method: "post",
+          url: "https://api.razorpay.com/v1/orders",
           auth: { username: keyId, password: keySecret },
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
           data: {
             amount: amountPaise,
-            currency: 'INR',
-            receipt: shortReceipt,
+            currency: "INR",
+            receipt: `lead_${purchase._id.toString().slice(-8)}`,
+            payment_capture: 1,
             notes: {
               lead_id: lead._id.toString(),
               seller_id: req.user._id.toString(),
-              purchase_id: purchase._id.toString()
+              purchase_id: purchase._id.toString(),
+              product: lead.product
             }
-          },
-          timeout: 10000 // 10s timeout
+          }
         });
 
-        console.log("✅ Razorpay order created via Axios:", response.data.id);
-        const razorpayOrder = response.data;
-
         orderDetails = {
-          id: razorpayOrder.id,
-          amount: razorpayOrder.amount,
-          currency: razorpayOrder.currency,
+          id: response.data.id,
+          amount: response.data.amount,
+          currency: response.data.currency,
           key: keyId,
           name: "Lead Purchase",
           description: `Purchase lead for ${lead.product}`,
-          handler: "/api/leads/webhook/razorpay",
-          prefill: { name: req.user.name, email: req.user.email }
+          prefill: {
+            name: req.user.name,
+            email: req.user.email
+          }
         };
-      } catch (rzError) {
-        const errorDetails = {
-          message: rzError.message,
-          status: rzError.response?.status,
-          data: rzError.response?.data || 'Empty body (possible geo-restriction)',
-          code: rzError.code,
-          stack: rzError.stack?.substring(0, 200)
-        };
-        if (rzError.response?.status === 406 || rzError.response?.status === 403) {
-          errorDetails.geoHint = 'Razorpay geo-restriction (India-only). Use PayPal or India-based server for testing.';
-        }
-        console.error("❌ Full Razorpay Axios error:", errorDetails);
-        orderError = rzError;
-      }
-    } else if (payment_method === "paypal") {
-      try {
-        orderDetails = await createPayPalOrder(lead, purchase);
-      } catch (ppError) {
-        console.error("❌ PayPal order failed:", ppError.response?.data || ppError.message);
-        orderError = ppError;
+
+        purchase.razorpay_order_id = orderDetails.id;
+        purchase.payment_id = orderDetails.id;
+        purchase.payment_status = "initiated";
+
+      } catch (err) {
+        orderError = err;
       }
     }
 
-    if (orderError) {
+    // 🟦 PayPal order creation
+    if (payment_method === "paypal") {
+      try {
+        orderDetails = await createPayPalOrder(lead, purchase, req.user);
+        purchase.payment_id = orderDetails.id;
+        purchase.payment_status = "initiated";
+      } catch (err) {
+        orderError = err;
+      }
+    }
+
+    // 🟩 Manual payment - SIMPLIFIED (only screenshot required)
+    if (payment_method === "manual") {
+      purchase.payment_status = "manual_pending";
+      purchase.notes = "Manual payment pending. Please upload payment screenshot.";
+    }
+
+    if (orderError && payment_method !== "manual") {
       purchase.payment_status = "failed";
-      const errMsg = orderError?.response?.data ? JSON.stringify(orderError.response.data) : (orderError.message || String(orderError));
-      purchase.payment_response = { error: errMsg };
+      purchase.payment_response = { error: orderError.message };
       await purchase.save();
 
-      const safeMessage = orderError?.response?.data?.description || orderError.message || "Unknown payment provider error";
-      console.error("❌ Finalized orderError (sanitized):", safeMessage);
-
-      return res.status(500).json({
-        message: "Failed to create purchase",
-        error: `Payment order creation failed: ${safeMessage}`
+      return res.status(400).json({
+        message: "Payment order creation failed",
+        error: orderError.response?.data || orderError.message
       });
     }
 
-    purchase.payment_id = orderDetails.id;
     await purchase.save();
 
-    res.json({
-      message: `${payment_method.toUpperCase()} order created successfully.`,
-      purchase: purchase._id,
-      order: orderDetails
+    return res.json({
+      success: true,
+      message: payment_method === "manual"
+        ? "Manual purchase initiated. Please upload payment screenshot."
+        : `${payment_method.toUpperCase()} order created successfully`,
+      purchaseId: purchase._id,
+      payment_mode: payment_method,
+      order: orderDetails,
+      requires_manual_upload: payment_method === "manual"
     });
-  } catch (error) {
-    console.error("❌ Error in buyLead:", {
-      err: error,
-      message: error?.message
-    });
-    res.status(500).json({
-      message: "Failed to create purchase",
-      error: error.message || String(error)
+
+  } catch (err) {
+    console.error("❌ buyLead error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: err.message
     });
   }
 };
 
+// ── Verify Razorpay Payment ──────────────────────────────
+exports.verifyRazorpayPayment = async (req, res) => {
+  try {
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      purchaseId
+    } = req.body;
 
+    const purchase = await LeadPurchase.findById(purchaseId);
+    if (!purchase) {
+      return res.status(404).json({ message: "Purchase not found" });
+    }
 
+    // Verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
 
+    if (expectedSignature === razorpay_signature) {
+      // Payment successful
+      purchase.payment_status = "approved";
+      purchase.razorpay_payment_id = razorpay_payment_id;
+      purchase.razorpay_signature = razorpay_signature;
+      purchase.approved_at = new Date();
+      await purchase.save();
+
+      // Update lead sold count
+      const lead = await Lead.findById(purchase.lead);
+      lead.sold_count += 1;
+      if (lead.sold_count >= lead.max_sellers) {
+        lead.status = "sold";
+      }
+      await lead.save();
+
+      // Create conversation
+      await this.createConversationForPurchase(purchase);
+
+      res.json({
+        success: true,
+        message: "Payment verified successfully",
+        purchase: purchase
+      });
+    } else {
+      // Signature verification failed
+      purchase.payment_status = "failed";
+      await purchase.save();
+
+      res.status(400).json({
+        success: false,
+        message: "Payment verification failed"
+      });
+    }
+  } catch (error) {
+    console.error("❌ Razorpay verification error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Payment verification failed",
+      error: error.message
+    });
+  }
+};
+
+// ── Create Conversation for Purchase ─────────────────────
+exports.createConversationForPurchase = async (purchase) => {
+  try {
+    const populatedPurchase = await LeadPurchase.findById(purchase._id)
+      .populate("lead")
+      .populate("seller")
+      .populate("lead.buyer");
+
+    const { lead, seller } = populatedPurchase;
+
+    // Create conversation between buyer and seller
+    let conversation = await Conversation.findOne({
+      participants: { $all: [lead.buyer._id, seller._id] },
+      lead: lead._id
+    });
+
+    if (!conversation) {
+      conversation = new Conversation({
+        buyer: lead.buyer._id,
+        seller: seller._id,
+        participants: [lead.buyer._id, seller._id],
+        lead: lead._id
+      });
+      await conversation.save();
+    }
+
+    // Create system message
+    const systemMessage = new Message({
+      conversation: conversation._id,
+      sender: seller._id, // Seller as sender for system message
+      type: "system",
+      text: `🎉 Lead purchase completed! Seller ${seller.name} has purchased your lead for ${lead.product}. You can now communicate directly.`
+    });
+    await systemMessage.save();
+
+    // If buyer allowed contact sharing, send contact details
+    if (lead.allow_sellers_contact) {
+      const contactMessage = new Message({
+        conversation: conversation._id,
+        sender: seller._id,
+        type: "system",
+        text: `📞 Buyer Contact Details:\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`
+      });
+      await contactMessage.save();
+    }
+
+    return conversation;
+  } catch (error) {
+    console.error("❌ Error creating conversation:", error);
+    throw error;
+  }
+};
 
 // ── SELLER: Get My Purchased Leads ────────────────────────
 exports.getMyPurchasedLeads = async (req, res) => {
   try {
-    if (req.user.role !== "seller") {
-      return res.status(403).json({ message: "Sellers only" });
-    }
+    console.log("🔍 getMyPurchasedLeads called for seller:", req.user._id);
+
+    if (req.user.role !== "seller") return res.status(403).json({ message: "Seller access required" });
 
     const { page = 1, limit = 10 } = req.query;
 
@@ -673,7 +894,30 @@ exports.getMyPurchasedLeads = async (req, res) => {
   }
 };
 
-// ── ADMIN: Verify Payment & Create Chat (UPDATED: For manual only; integrated uses webhooks) ──
+// ── Get Payment Status ───────────────────────────────────
+exports.getPaymentStatus = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+
+    const purchase = await LeadPurchase.findById(purchaseId)
+      .populate('lead')
+      .populate('seller');
+
+    if (!purchase) {
+      return res.status(404).json({ message: "Purchase not found" });
+    }
+
+    res.json({
+      status: purchase.payment_status,
+      purchase: purchase
+    });
+  } catch (error) {
+    console.error("Error getting payment status:", error);
+    res.status(500).json({ message: "Failed to get payment status" });
+  }
+};
+
+// ── ADMIN: Verify Payment & Create Chat ───────────────────
 exports.verifyPayment = async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -690,22 +934,28 @@ exports.verifyPayment = async (req, res) => {
       .populate("lead.buyer");
 
     if (!purchase) {
-      return res.status(404).json({ message: "Purchase not found" });
-    }
-
-    if (purchase.payment_mode !== "manual") {
-      return res.status(400).json({ message: "Only manual payments can be verified here. Integrated payments are auto-verified via webhooks." });
+      return res.status(404).json({ success: false, message: "Purchase not found" });
     }
 
     if (purchase.payment_status === "approved") {
-      return res.status(400).json({ message: "Payment already approved" });
+      return res.status(400).json({ success: false, message: "Payment already approved" });
     }
 
+    // Check if this is a manual payment with screenshot
+    if (purchase.payment_mode === "manual" && !purchase.payment_proof) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment screenshot is required for manual payment verification"
+      });
+    }
+
+    // Update payment status
     purchase.payment_status = "approved";
     purchase.approved_by = req.user._id;
     purchase.approved_at = new Date();
     await purchase.save();
 
+    // Update lead sold count
     const lead = purchase.lead;
     lead.sold_count += 1;
     if (lead.sold_count >= lead.max_sellers) {
@@ -713,46 +963,23 @@ exports.verifyPayment = async (req, res) => {
     }
     await lead.save();
 
-    let conversation = await Conversation.findOne({
-      participants: { $all: [lead.buyer._id, purchase.seller._id] }
-    });
-
-    if (!conversation) {
-      conversation = new Conversation({
-        buyer: lead.buyer._id,
-        seller: purchase.seller._id,
-        participants: [lead.buyer._id, purchase.seller._id],
-        lead: lead._id
-      });
-      await conversation.save();
-    }
-
-    const systemMessage = new Message({
-      conversation: conversation._id,
-      sender: req.user._id,
-      type: "system",
-      text: `🎉 Lead purchase verified! Seller ${purchase.seller.name} has purchased your lead for ${lead.product}. You can now communicate directly.`
-    });
-    await systemMessage.save();
-
-    if (lead.allow_sellers_contact) {
-      const contactMessage = new Message({
-        conversation: conversation._id,
-        sender: req.user._id,
-        type: "system",
-        text: `📞 Buyer Contact Details:\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`
-      });
-      await contactMessage.save();
-    }
+    // Create conversation
+    const conversation = await this.createConversationForPurchase(purchase);
 
     res.json({
+      success: true,
       message: "Payment verified successfully! Chat created between buyer and seller.",
       conversation_id: conversation._id,
-      contact_shared: lead.allow_sellers_contact
+      contact_shared: lead.allow_sellers_contact,
+      payment_mode: purchase.payment_mode
     });
   } catch (error) {
     console.error("❌ Error in verifyPayment:", error);
-    res.status(500).json({ message: "Failed to verify payment", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Failed to verify payment",
+      error: error.message
+    });
   }
 };
 
@@ -765,7 +992,9 @@ exports.getPendingPayments = async (req, res) => {
 
     const { page = 1, limit = 10 } = req.query;
 
-    const pendingPayments = await LeadPurchase.find({ payment_status: "pending" })
+    const pendingPayments = await LeadPurchase.find({
+      payment_status: { $in: ["pending", "manual_pending"] }
+    })
       .populate({
         path: "lead",
         populate: [{ path: "buyer", select: "name email" }]
@@ -775,9 +1004,12 @@ exports.getPendingPayments = async (req, res) => {
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
-    const total = await LeadPurchase.countDocuments({ payment_status: "pending" });
+    const total = await LeadPurchase.countDocuments({
+      payment_status: { $in: ["pending", "manual_pending"] }
+    });
 
     res.json({
+      success: true,
       payments: pendingPayments,
       total,
       page: parseInt(page),
@@ -785,11 +1017,59 @@ exports.getPendingPayments = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error in getPendingPayments:", error);
-    res.status(500).json({ message: "Failed to fetch pending payments", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch pending payments",
+      error: error.message
+    });
   }
 };
 
-// ── ADMIN: Revenue Analytics ─────────────────────────────
+// ── ADMIN: Reject Payment ─────────────────────────────────
+exports.rejectPayment = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { purchaseId } = req.params;
+    const { rejection_reason } = req.body;
+
+    console.log("🔄 Reject payment request:", { purchaseId, admin: req.user._id, rejection_reason });
+
+    const purchase = await LeadPurchase.findById(purchaseId);
+
+    if (!purchase) {
+      return res.status(404).json({ success: false, message: "Purchase not found" });
+    }
+
+    if (purchase.payment_status === "approved") {
+      return res.status(400).json({ success: false, message: "Payment already approved" });
+    }
+
+    // Update payment status to failed
+    purchase.payment_status = "failed";
+    purchase.notes = rejection_reason
+      ? `${purchase.notes || ''}\nRejected: ${rejection_reason}`
+      : purchase.notes;
+    await purchase.save();
+
+    res.json({
+      success: true,
+      message: "Payment rejected successfully",
+      purchase: purchase
+    });
+  } catch (error) {
+    console.error("❌ Error in rejectPayment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to reject payment",
+      error: error.message
+    });
+  }
+};
+
+// ── ADMIN: Revenue Analytics ──────────────────────────────
 exports.getLeadAnalytics = async (req, res) => {
   try {
     if (req.user.role !== "admin") return res.status(403).json({ message: "Admin access required" });
@@ -815,211 +1095,87 @@ exports.getLeadAnalytics = async (req, res) => {
         $group: {
           _id: null,
           totalRevenue: { $sum: "$lead.lead_price" },
-          leadsSold: { $sum: 1 }
+          leadsSold: { $sum: 1 },
+          razorpayRevenue: {
+            $sum: {
+              $cond: [{ $eq: ["$payment_mode", "razorpay"] }, "$lead.lead_price", 0]
+            }
+          },
+          paypalRevenue: {
+            $sum: {
+              $cond: [{ $eq: ["$payment_mode", "paypal"] }, "$lead.lead_price", 0]
+            }
+          },
+          manualRevenue: {
+            $sum: {
+              $cond: [{ $eq: ["$payment_mode", "manual"] }, "$lead.lead_price", 0]
+            }
+          }
         }
       }
     ]);
 
-    res.json(stats[0] || { totalRevenue: 0, leadsSold: 0 });
+    const result = stats[0] || {
+      totalRevenue: 0,
+      leadsSold: 0,
+      razorpayRevenue: 0,
+      paypalRevenue: 0,
+      manualRevenue: 0
+    };
+
+    // Add conversion rate
+    const totalLeads = await Lead.countDocuments({ status: "approved" });
+    result.conversionRate = totalLeads > 0 ? (result.leadsSold / totalLeads * 100).toFixed(2) : 0;
+
+    res.json({
+      success: true,
+      ...result
+    });
   } catch (error) {
     console.error("❌ Error in getLeadAnalytics:", error);
-    res.status(500).json({ message: "Failed to fetch analytics", error: error.message });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch analytics",
+      error: error.message
+    });
   }
 };
 
-// ── WEBHOOK: Razorpay Payment Verification ────────────────
-exports.webhookRazorpay = async (req, res) => {
+// ── Payment Webhook ──────────────────────────────────────
+exports.paymentWebhook = async (req, res) => {
   try {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const rawBody = req.body.toString("utf8");
-    const receivedSignature = req.headers["x-razorpay-signature"];
-
-    console.log("🔔 Razorpay webhook hit");
-
-    if (!webhookSecret) {
-      console.log("⚠️ Missing webhook secret");
-      return res.status(400).send("Missing webhook secret");
-    }
-
-    const expectedSignature = crypto
-      .createHmac("sha256", webhookSecret)
-      .update(rawBody)
-      .digest("hex");
-
-    if (expectedSignature !== receivedSignature) {
-      console.log("❌ Invalid webhook signature");
-      return res.status(400).send("Invalid signature");
-    }
-
-    // Parse raw JSON
-    let data;
-    try {
-      data = JSON.parse(rawBody);
-    } catch (e) {
-      console.log("❌ Invalid webhook JSON");
-      return res.status(400).send("Invalid JSON");
-    }
-
-    const event = data.event;
-    const payment = data.payload?.payment?.entity;
+    const { event, payload } = req.body;
 
     if (event === "payment.captured") {
-      const paymentId = payment.id;
+      const { payment, order } = payload;
 
+      // Find purchase by Razorpay order ID
       const purchase = await LeadPurchase.findOne({
-        payment_id: paymentId,
-        payment_mode: "razorpay"
+        razorpay_order_id: order.entity.id
       });
 
-      if (!purchase) {
-        console.log("⚠️ No purchase found");
-        return res.status(404).send("Purchase not found");
-      }
+      if (purchase && purchase.payment_status !== "approved") {
+        purchase.payment_status = "approved";
+        purchase.razorpay_payment_id = payment.entity.id;
+        purchase.approved_at = new Date();
+        await purchase.save();
 
-      purchase.payment_status = "approved";
-      purchase.approved_at = new Date();
-      purchase.payment_response = payment;
-      await purchase.save();
-
-      // Update lead sold_count
-      const lead = await Lead.findById(purchase.lead);
-      lead.sold_count += 1;
-      if (lead.sold_count >= lead.max_sellers) {
-        lead.status = "sold";
-      }
-      await lead.save();
-
-      console.log("🎉 Payment captured:", paymentId);
-    }
-
-    if (event === "payment.failed") {
-      const paymentId = payment.id;
-
-      await LeadPurchase.findOneAndUpdate(
-        { payment_id: paymentId },
-        {
-          payment_status: "failed",
-          payment_response: payment
+        // Update lead sold count
+        const lead = await Lead.findById(purchase.lead);
+        lead.sold_count += 1;
+        if (lead.sold_count >= lead.max_sellers) {
+          lead.status = "sold";
         }
-      );
+        await lead.save();
 
-      console.log("❌ Payment failed:", paymentId);
+        // Create conversation
+        await this.createConversationForPurchase(purchase);
+      }
     }
 
-    return res.status(200).send("OK");
+    res.json({ success: true, received: true });
   } catch (error) {
-    console.error("❌ Webhook error:", error);
-    return res.status(500).send("Server error");
-  }
-};
-
-
-// ── WEBHOOK: PayPal Payment Verification ──────────────────
-exports.webhookPayPal = async (req, res) => {
-  try {
-    const event = req.body;
-    console.log("🔄 Incoming PayPal webhook event:", JSON.stringify(event, null, 2));
-
-    console.log("✅ Verification skipped for test; proceeding to handle event");
-
-    if (event.event_type === "PAYMENT.CAPTURE.COMPLETED") {
-      const capture = event.resource;
-      const customId = capture.custom_id;
-
-      const parts = customId.split("_");
-      if (parts.length < 6) {
-        return res.status(400).json({ message: "Invalid custom_id format" });
-      }
-
-      const purchaseId = parts[5];
-      const purchase = await LeadPurchase.findById(purchaseId)
-        .populate({
-          path: "lead",
-          populate: { path: "buyer", select: "name" }
-        })
-        .populate("seller", "name");
-
-      if (!purchase || purchase.payment_mode !== "paypal" || purchase.payment_status !== "pending") {
-        return res.status(400).json({ message: "Invalid or already processed purchase" });
-      }
-
-      purchase.payment_status = "approved";
-      purchase.payment_id = capture.id;
-      purchase.payment_response = event;
-      purchase.approved_at = new Date();
-      await purchase.save();
-
-      const lead = purchase.lead;
-      lead.sold_count += 1;
-      if (lead.sold_count >= lead.max_sellers) {
-        lead.status = "sold";
-      }
-      await lead.save();
-
-      console.log("✅ DB updates complete, starting chat...");
-      try {
-        let conversation = await Conversation.findOne({
-          participants: { $all: [lead.buyer._id, purchase.seller._id] }
-        });
-
-        if (!conversation) {
-          conversation = new Conversation({
-            buyer: lead.buyer._id,
-            seller: purchase.seller._id,
-            participants: [lead.buyer._id, purchase.seller._id],
-            lead: lead._id
-          });
-          await conversation.save();
-          console.log("✅ Conversation created:", conversation._id);
-        }
-
-        const systemMessage = new Message({
-          conversation: conversation._id,
-          sender: null,
-          type: "system",
-          text: `Lead purchase successful via PayPal! Seller ${purchase.seller.name} has purchased your lead for ${lead.product}.`
-        });
-        await systemMessage.save();
-        console.log("✅ System message saved");
-
-        if (lead.allow_sellers_contact) {
-          const contactMessage = new Message({
-            conversation: conversation._id,
-            sender: null,
-            type: "system",
-            text: `Buyer Contact:\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`
-          });
-          await contactMessage.save();
-          console.log("✅ Contact message saved");
-        }
-      } catch (chatError) {
-        console.error("❌ Chat creation failed (non-critical):", chatError.message);
-      }
-
-      console.log("PayPal payment verified:", capture.id);
-    } else if (event.event_type === "PAYMENT.CAPTURE.DENIED") {
-      const capture = event.resource;
-      const customId = capture.custom_id;
-
-      const parts = customId.split("_");
-      if (parts.length < 6) {
-        console.log("Invalid custom_id for denied event, skipping");
-      } else {
-        const purchaseId = parts[5];
-        const purchase = await LeadPurchase.findById(purchaseId);
-
-        if (purchase && purchase.payment_mode === "paypal") {
-          purchase.payment_status = "failed";
-          purchase.payment_response = event;
-          await purchase.save();
-          console.log("PayPal payment denied:", capture.id);
-        }
-      }
-    }
-
-    res.status(200).json({ message: "Webhook processed" });
-  } catch (error) {
-    console.error("Error in webhookPayPal:", error.message);
-    res.status(500).json({ message: "Webhook processing failed" });
+    console.error("Webhook error:", error);
+    res.status(400).json({ success: false, error: "Webhook processing failed" });
   }
 };
