@@ -1,6 +1,6 @@
-// middleware/authMiddleware.js
 const jwt = require("jsonwebtoken");
 const { User, SellerProfile } = require("../models/indexModel");
+const { Customer } = require("../models/accountModel");
 
 const protect = async (req, res, next) => {
   let token;
@@ -10,10 +10,16 @@ const protect = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+      // First try to find in User model (admin/seller/user)
       req.user = await User.findById(decoded.id).select("-password");
 
       if (!req.user) {
-        return res.status(401).json({ message: "User not found, not authorized" });
+        // If not found in User model, try Customer model
+        req.user = await Customer.findById(decoded.id).select("-password");
+        
+        if (!req.user) {
+          return res.status(401).json({ message: "User not found, not authorized" });
+        }
       }
 
       next();
@@ -33,10 +39,16 @@ const optionalAuth = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+      // First try to find in User model (admin/seller/user)
       req.user = await User.findById(decoded.id).select("-password");
 
       if (!req.user) {
-        console.warn("User not found for token, proceeding as unauthenticated");
+        // If not found in User model, try Customer model
+        req.user = await Customer.findById(decoded.id).select("-password");
+
+        if (!req.user) {
+          console.warn("User not found for token, proceeding as unauthenticated");
+        }
       }
     } catch (error) {
       console.warn("Invalid token, proceeding as unauthenticated:", error.message);
@@ -88,16 +100,32 @@ const isSeller = async (req, res, next) => {
   }
 };
 
-const authMiddleware = (roles) => {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({ message: "Not authorized, no user found" });
-    }
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ message: `Access restricted to ${roles.join(", ")} roles` });
-    }
+const isCustomer = (req, res, next) => {
+  if (req.user && req.user.role === "customer") {
     next();
-  };
+  } else {
+    res.status(403).json({ message: "Customer access only" });
+  }
 };
 
-module.exports = { protect, optionalAuth, isAdmin, isSeller, authMiddleware };
+// REMOVED: The problematic authMiddleware function
+// const authMiddleware = (roles) => {
+//   return (req, res, next) => {
+//     if (!req.user) {
+//       return res.status(401).json({ message: "Not authorized, no user found" });
+//     }
+//     if (!roles.includes(req.user.role)) {
+//       return res.status(403).json({ message: `Access restricted to ${roles.join(", ")} roles` });
+//     }
+//     next();
+//   };
+// };
+
+module.exports = { 
+  protect, 
+  optionalAuth, 
+  isAdmin, 
+  isSeller, 
+  isCustomer 
+  // REMOVED: authMiddleware 
+};

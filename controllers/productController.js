@@ -2,14 +2,12 @@
 const {
   productModel: Product,
   categoryModel: Category,
-  Brand,
   coupon: Coupon,
   SellerProfile,
   User
 } = require("../models/indexModel");
 const slugify = require("slugify");
 const mongoose = require("mongoose");
-//global
 
 const getSellerConditions = async (userId) => {
   const sellerDoc = await SellerProfile.findOne({ user: userId }).lean();
@@ -27,12 +25,11 @@ const getAllProducts = async (req, res) => {
   try {
     const products = await Product.find()
       .populate("category", "name slug")
-      .populate("brand", "name slug")
       .populate({
         path: "seller", // Product → SellerProfile
         populate: {
           path: "user", // SellerProfile → User
-          select: "name email", // fetch seller’s name + email
+          select: "name email", // fetch seller's name + email
         },
       })
       .populate("coupons", "code discount")
@@ -72,7 +69,6 @@ const approveProduct = async (req, res) => {
   }
 };
 
-
 // reject a product
 const rejectProduct = async (req, res) => {
   try {
@@ -89,7 +85,6 @@ const rejectProduct = async (req, res) => {
 };
 
 //  Delete any product
-
 const deleteProduct = async (req, res) => {
   try {
     const product = await Product.findByIdAndDelete(req.params.id);
@@ -101,7 +96,6 @@ const deleteProduct = async (req, res) => {
 };
 
 // Assign coupon to product
-
 const assignCouponToProduct = async (req, res) => {
   try {
     const { couponId } = req.body;
@@ -150,9 +144,7 @@ const assignCouponToProduct = async (req, res) => {
   }
 };
 
-
 //  Remove coupon from product
-
 const removeCouponFromProduct = async (req, res) => {
   try {
     const { id } = req.params; // product id
@@ -182,12 +174,10 @@ const removeCouponFromProduct = async (req, res) => {
 
 //  SELLER FUNCTIONS
 
-
-//  Create product
 //  Create product (seller)
 const createProduct = async (req, res) => {
   try {
-    let { category, brand, name, slug, description, features, attributes, price, quantity } =
+    let { category, name, slug, description, features, attributes, price, quantity } =
       req.body;
 
     // ✅ Parse JSON if coming as strings (from Postman/form-data)
@@ -227,15 +217,6 @@ const createProduct = async (req, res) => {
       category = foundCategory._id;
     }
 
-    // ✅ Ensure brand is ObjectId
-    if (brand && typeof brand === "string" && !brand.match(/^[0-9a-fA-F]{24}$/)) {
-      const foundBrand = await Brand.findOne({ name: brand });
-      if (!foundBrand) {
-        return res.status(400).json({ message: `Brand '${brand}' not found` });
-      }
-      brand = foundBrand._id;
-    }
-
     // ✅ Auto-generate slug if not provided
     if (!slug && name) {
       slug = slugify(name, { lower: true, strict: true });
@@ -243,7 +224,6 @@ const createProduct = async (req, res) => {
 
     const newProduct = new Product({
       category,
-      brand,
       seller: sellerProfile._id, // ✅ SellerProfile reference
       name,
       slug,
@@ -302,7 +282,6 @@ const updateOwnProduct = async (req, res) => {
 };
 
 //  Delete own product
-
 const deleteOwnProduct = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -329,7 +308,6 @@ const deleteOwnProduct = async (req, res) => {
     res.status(500).json({ message: "Error deleting product", error: error.message });
   }
 };
-
 
 //  Toggle stock
 const toggleStock = async (req, res) => {
@@ -372,7 +350,6 @@ const toggleSale = async (req, res) => {
 };
 
 //  Apply coupon to own product(need test)
-
 const applyCoupon = async (req, res) => {
   try {
     const { couponId } = req.body;
@@ -464,7 +441,6 @@ const applyCoupon = async (req, res) => {
 };
 
 // Get my products
-
 const getMyProducts = async (req, res) => {
   try {
     const userId = req.user?._id;
@@ -486,7 +462,6 @@ const getMyProducts = async (req, res) => {
 
     const products = await Product.find({ $or: conditions })
       .populate("category")
-      .populate("brand")
       .sort({ createdAt: -1 });
 
     res.json(products);
@@ -503,11 +478,10 @@ const getMyProducts = async (req, res) => {
 // Modified getApprovedProducts to support search
 const getApprovedProducts = async (req, res) => {
   try {
-    const { category, brand, minPrice, maxPrice, search } = req.query;
+    const { category, minPrice, maxPrice, search } = req.query;
     let filter = { status: "approved" };
 
     if (category) filter.category = category;
-    if (brand) filter.brand = brand;
     if (minPrice || maxPrice)
       filter.price = { $gte: Number(minPrice) || 0, $lte: Number(maxPrice) || Infinity };
     if (search) {
@@ -515,7 +489,7 @@ const getApprovedProducts = async (req, res) => {
     }
 
     const products = await Product.find(filter)
-      .populate("category brand seller")
+      .populate("category seller")
       .limit(10);
 
     // Optional personalization (silent for guests)
@@ -533,7 +507,7 @@ const getApprovedProducts = async (req, res) => {
 const getProductBySlug = async (req, res) => {
   try {
     const product = await Product.findOne({ slug: req.params.slug, status: "approved" })
-      .populate("category brand seller coupons");
+      .populate("category seller coupons");
     if (!product) return res.status(404).json({ message: "Product not found" });
     res.json(product);
   } catch (error) {
@@ -542,7 +516,6 @@ const getProductBySlug = async (req, res) => {
 };
 
 //  Like/unlike a product
-
 const likeProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
@@ -564,7 +537,6 @@ const likeProduct = async (req, res) => {
 };
 
 //  Add review (basic rating system)
-
 const addReview = async (req, res) => {
   try {
     const { rating } = req.body;
@@ -582,7 +554,6 @@ const addReview = async (req, res) => {
   }
 };
 
-
 //  Get wishlist (liked products)
 const getWishlist = async (req, res) => {
   try {
@@ -594,7 +565,6 @@ const getWishlist = async (req, res) => {
 };
 
 module.exports = {
-
   // Admin
   getAllProducts,
   approveProduct,

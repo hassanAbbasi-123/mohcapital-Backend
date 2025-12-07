@@ -1,4 +1,5 @@
 // controllers/authController.js
+const { Customer } = require("../models/accountModel");
 const mongoose = require("mongoose");
 const { User } = require("../models/indexModel"); // Only User is needed now
 const jwt = require("jsonwebtoken");
@@ -155,10 +156,37 @@ exports.register = async (req, res) => {
   }
 };
 
-// LOGIN
+// controllers/authController.js - UPDATE LOGIN FUNCTION
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, customerId } = req.body;
 
+  // If customerId is provided, handle customer login
+  if (customerId) {
+    try {
+      const customer = await Customer.findOne({ customerId });
+      if (!customer || !(await customer.correctPassword(password))) {
+        return res.status(401).json({ message: "Invalid customer ID or password" });
+      }
+
+      if (!customer.isActive) {
+        return res.status(403).json({ message: "Customer account is deactivated" });
+      }
+
+      return res.json({
+        _id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        customerId: customer.customerId,
+        role: 'customer',
+        phone: customer.phone || null,
+        token: generateToken(customer._id, 'customer'),
+      });
+    } catch (err) {
+      return res.status(500).json({ message: err.message });
+    }
+  }
+
+  // Original email/password login for admin/seller/user
   if (!email || !password) {
     return res.status(400).json({ message: "Email and password required" });
   }

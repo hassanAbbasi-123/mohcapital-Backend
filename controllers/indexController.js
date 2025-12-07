@@ -1,7 +1,6 @@
 const authController=require("./authController");
 const categoryController=require("./categoryController");
 const productController=require("./productController");
-const brandController=require("./brandController");
 const wishlistController=require("./wishlistController");
 const cartController=require("./cartController");
 const analyticsController=require("./analyticsController");
@@ -13,7 +12,6 @@ module.exports={
     authController,
     categoryController,
     productController,
-    brandController,
     wishlistController,
     cartController,
     analyticsController,

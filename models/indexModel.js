@@ -2,7 +2,6 @@ const categoryModel = require("./categoryModel");
 const productModel = require("./productModel");
 const User = require("./userModel");
 const SellerProfile = require("./sellerProfile");
-const Brand=require("./brandModel");
 const coupon=require("./couponModel");
 const wishlist =require("./wishlistModel");
 const conversation=require("./chatmodel/conversationModel");
@@ -16,7 +15,6 @@ module.exports = {
     categoryModel,
     SellerProfile,
     productModel,
-    Brand,
     coupon,
     wishlist,
     conversation,
