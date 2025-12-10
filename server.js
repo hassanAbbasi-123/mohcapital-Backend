@@ -16,7 +16,11 @@ const server = http.createServer(app);
 // ✅ Enable CORS
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: [
+      "http://localhost:3000",
+      "https://moh-frontend.vercel.app",
+      "https://moh-frontend-4k1hrhvj9-hassans-projects-fbf99e67.vercel.app"
+    ],
     credentials: true,
   })
 );
