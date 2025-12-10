@@ -10,7 +10,7 @@ const sellerSubSchema = new mongoose.Schema({
   city: String,
   state: String,
   kycStatus: { type: String, enum: ["pending","approved","rejected"], default: "pending" },
-  documents: [{ type: String }],          // array of file paths
+  documents: [{ type: String }],          
   verifiedAt: Date,
 });
 
