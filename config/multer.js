@@ -37,7 +37,7 @@ const storage = multer.diskStorage({
 
     // BANNERS
     else if (req.baseUrl.includes("/banners")) {
-      folder = `${base}/banners`;
+      folder = `${base}/banners/images`;
     }
 
     // PRODUCTS

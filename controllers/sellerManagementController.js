@@ -271,8 +271,7 @@ exports.getSellerPerformance = async (req, res) => {
   }
 };
 
-// APPROVE / REJECT — HYBRID
-// APPROVE / REJECT — HYBRID (SellerProfile + User.seller sync)
+// APPROVE / REJECT — HYBRID (SellerProfile + User.seller
 exports.approveOrDisapproveSeller = async (req, res) => {
   try {
     console.log("=== APPROVE/DISAPPROVE DEBUG ===");
