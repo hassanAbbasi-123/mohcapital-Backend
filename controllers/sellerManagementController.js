@@ -272,6 +272,7 @@ exports.getSellerPerformance = async (req, res) => {
 };
 
 // APPROVE / REJECT — HYBRID
+// APPROVE / REJECT — HYBRID (SellerProfile + User.seller sync)
 exports.approveOrDisapproveSeller = async (req, res) => {
   try {
     console.log("=== APPROVE/DISAPPROVE DEBUG ===");
@@ -294,13 +295,18 @@ exports.approveOrDisapproveSeller = async (req, res) => {
       return res.status(400).json({ message: "Invalid sellerId" });
     }
 
-    // Try new SellerProfile
+    // ============================
+    // TRY NEW SellerProfile FIRST
+    // ============================
+
     const sellerProfile = await SellerProfile.findOne({ user: sellerId }).populate("user", "role");
 
     if (sellerProfile) {
       console.log("Found SellerProfile:", sellerProfile._id);
 
+      // Update SellerProfile
       sellerProfile.kyc.status = action === "approve" ? "verified" : "rejected";
+
       if (action === "approve") {
         sellerProfile.isVerified = true;
         sellerProfile.kyc.verifiedAt = new Date();
@@ -310,12 +316,25 @@ exports.approveOrDisapproveSeller = async (req, res) => {
         sellerProfile.kyc.verifiedAt = null;
         sellerProfile.kyc.verifiedBy = null;
       }
+
       await sellerProfile.save();
 
       console.log("SellerProfile updated:", {
         kycStatus: sellerProfile.kyc.status,
         isVerified: sellerProfile.isVerified,
       });
+
+      // ALSO UPDATE user.seller (legacy sync)
+      const linkedUser = await User.findById(sellerId);
+
+      if (linkedUser && linkedUser.seller) {
+        linkedUser.seller.kycStatus = action === "approve" ? "approved" : "rejected";
+        linkedUser.seller.verifiedAt = action === "approve" ? new Date() : null;
+
+        await linkedUser.save();
+
+        console.log("User.seller synced:", linkedUser.seller.kycStatus);
+      }
 
       return res.json({
         message: `Seller ${action}d successfully`,
@@ -327,9 +346,14 @@ exports.approveOrDisapproveSeller = async (req, res) => {
       });
     }
 
-    // Legacy fallback
+    // ============================================
+    // NO SellerProfile FOUND → USE LEGACY USER DATA
+    // ============================================
+
     console.log("No SellerProfile found. Trying legacy User.seller...");
+
     const legacyUser = await User.findById(sellerId);
+
     if (!legacyUser || legacyUser.role !== "seller") {
       console.log("Legacy user not found or not seller");
       return res.status(404).json({ message: "Seller not found" });
@@ -340,8 +364,10 @@ exports.approveOrDisapproveSeller = async (req, res) => {
       return res.status(500).json({ message: "Seller data incomplete (missing seller subdoc)" });
     }
 
+    // Update User.seller
     legacyUser.seller.kycStatus = action === "approve" ? "approved" : "rejected";
     legacyUser.seller.verifiedAt = action === "approve" ? new Date() : null;
+
     await legacyUser.save();
 
     console.log("Legacy user updated:", legacyUser.seller.kycStatus);
@@ -354,6 +380,7 @@ exports.approveOrDisapproveSeller = async (req, res) => {
         kycStatus: legacyUser.seller.kycStatus,
       },
     });
+
   } catch (err) {
     console.error("approveOrDisapproveSeller error:", err);
     res.status(500).json({ message: err.message });
