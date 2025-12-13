@@ -1,7 +1,8 @@
+// Updated brandController.js
 const Brand = require("../models/brandModel");
 const slugify = require("slugify");
 const Product = require("../models/productModel"); // for cascade checks
-const path = require("path");
+const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper
 
 // ===================================
 // SELLER SIDE
@@ -15,16 +16,17 @@ exports.createBrand = async (req, res) => {
     const existing = await Brand.findOne({ name });
     if (existing) return res.status(400).json({ message: "Brand already exists" });
 
-    // Logo upload path (sellerBrands)
-    let logoPath = null;
+    // Logo upload to Cloudinary
+    let logo = null;
     if (req.file) {
-      logoPath = `/uploads/brands/sellerBrands/${req.file.filename}`;
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      logo = uploadResult.secure_url;
     }
 
     const brand = new Brand({
       name,
       slug: slugify(name, { lower: true }),
-      logo: logoPath,
+      logo,
       description,
       website,
       country,
@@ -51,9 +53,10 @@ exports.updateBrandBySeller = async (req, res) => {
     const brand = await Brand.findOne({ _id: brandId, createdBy: req.user._id });
     if (!brand) return res.status(404).json({ message: "Brand not found or not owned by seller" });
 
-    // Handle new logo upload (replace)
+    // Handle new logo upload to Cloudinary (replace)
     if (req.file) {
-      updates.logo = `/uploads/brands/sellerBrands/${req.file.filename}`;
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      updates.logo = uploadResult.secure_url;
     }
 
     if (!brand.isApproved) {
@@ -129,7 +132,8 @@ exports.addBrandByAdmin = async (req, res) => {
 
     let logo = null;
     if (req.file) {
-      logo = req.file.path.replace(/\\/g, "/"); // normalize for cross-platform
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      logo = uploadResult.secure_url;
     }
 
     const brand = new Brand({
@@ -180,9 +184,10 @@ exports.updateBrandByAdmin = async (req, res) => {
     const { brandId } = req.params;
     const updates = req.body;
 
-    // Handle logo upload (adminBrands)
+    // Handle logo upload to Cloudinary (adminBrands)
     if (req.file) {
-      updates.logo = `/uploads/brands/adminBrands/${req.file.filename}`;
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      updates.logo = uploadResult.secure_url;
     }
 
     const brand = await Brand.findByIdAndUpdate(brandId, updates, { new: true });

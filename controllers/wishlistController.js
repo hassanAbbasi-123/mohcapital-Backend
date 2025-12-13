@@ -6,6 +6,20 @@ const Category = require("../models/categoryModel");
 const SellerProfile = require("../models/sellerProfile");
 
 /**
+ * Utility: Build full URL for legacy local paths (Cloudinary URLs are already full).
+ * Uses BASE_URL env var if available, otherwise falls back to request's host.
+ */
+const buildFileUrl = (req, filepath) => {
+  if (!filepath) return "";
+  // If it's already a full URL (Cloudinary), return as-is
+  if (/^https?:\/\//i.test(filepath)) return filepath;
+  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+  // Normalize Windows backslashes to forward slashes
+  const normalized = filepath.replace(/\\/g, "/").replace(/^\/+/g, "");
+  return `${baseUrl}/${normalized}`;
+};
+
+/**
  * Utility: ensure a wishlist doc exists for a user and return it
  */
 async function ensureWishlist(userId) {
@@ -112,10 +126,20 @@ exports.addToWishlist = async (req, res) => {
       if (wishlist.products[idx].status === "active") {
         // Return populated wishlist to client
         const populated = await Wishlist.findById(wishlist._id)
-          .populate({ path: "products.product", select: "name slug price image category brand status" })
+          .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
           .populate({ path: "products.seller", select: "shopName user" });
         
+        // Normalize images in populated products for Cloudinary/legacy
         const normalizedWishlist = normalizeWishlistResponse(populated);
+        normalizedWishlist.products = normalizedWishlist.products.map(item => {
+          const productItem = item;
+          productItem.image = buildFileUrl(req, productItem.image);
+          if (productItem.gallery) {
+            productItem.gallery = productItem.gallery.map(g => buildFileUrl(req, g));
+          }
+          return productItem;
+        });
+
         return res.status(200).json({ message: "Already in wishlist", wishlist: normalizedWishlist });
       }
       // Was removed before → restore (soft)
@@ -135,10 +159,20 @@ exports.addToWishlist = async (req, res) => {
     await wishlist.save();
 
     const populated = await Wishlist.findById(wishlist._id)
-      .populate({ path: "products.product", select: "name slug price image category brand status" })
+      .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
       .populate({ path: "products.seller", select: "shopName user" });
 
+    // Normalize images in populated products for Cloudinary/legacy
     const normalizedWishlist = normalizeWishlistResponse(populated);
+    normalizedWishlist.products = normalizedWishlist.products.map(item => {
+      const productItem = item;
+      productItem.image = buildFileUrl(req, productItem.image);
+      if (productItem.gallery) {
+        productItem.gallery = productItem.gallery.map(g => buildFileUrl(req, g));
+      }
+      return productItem;
+    });
+
     return res.status(201).json({ message: "Added to wishlist", wishlist: normalizedWishlist });
   } catch (error) {
     console.error("addToWishlist error:", error);
@@ -183,10 +217,20 @@ exports.removeFromWishlist = async (req, res) => {
     await wishlist.save();
 
     const populated = await Wishlist.findById(wishlist._id)
-      .populate({ path: "products.product", select: "name slug price image category brand status" })
+      .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
       .populate({ path: "products.seller", select: "shopName user" });
 
+    // Normalize images in populated products for Cloudinary/legacy
     const normalizedWishlist = normalizeWishlistResponse(populated);
+    normalizedWishlist.products = normalizedWishlist.products.map(item => {
+      const productItem = item;
+      productItem.image = buildFileUrl(req, productItem.image);
+      if (productItem.gallery) {
+        productItem.gallery = productItem.gallery.map(g => buildFileUrl(req, g));
+      }
+      return productItem;
+    });
+
     return res.status(200).json({ message: "Removed from wishlist", wishlist: normalizedWishlist });
   } catch (error) {
     console.error("removeFromWishlist error:", error);
@@ -229,7 +273,7 @@ exports.getWishlistByUser = async (req, res) => {
     const populated = await Wishlist.populate(temp, [
       {
         path: "products.product",
-        select: "name slug price image category brand status",
+        select: "name slug price image category brand status gallery",
         populate: {
           path: "category",
           select: "name slug parentCategory",
@@ -252,7 +296,17 @@ exports.getWishlistByUser = async (req, res) => {
       removed: wishlist.products.filter((p) => p.status === "removed").length,
     };
 
+    // Normalize images in populated products for Cloudinary/legacy
     const normalizedWishlist = normalizeWishlistResponse(populated);
+    normalizedWishlist.products = normalizedWishlist.products.map(item => {
+      const productItem = item;
+      productItem.image = buildFileUrl(req, productItem.image);
+      if (productItem.gallery) {
+        productItem.gallery = productItem.gallery.map(g => buildFileUrl(req, g));
+      }
+      return productItem;
+    });
+
     return res.status(200).json({ wishlist: normalizedWishlist, counts });
   } catch (error) {
     console.error("getWishlistByUser error:", error);
@@ -363,28 +417,21 @@ exports.getSellerWishlistStats = async (req, res) => {
 
     const [result = {}] = await Wishlist.aggregate(pipeline);
 
-    // Post-process images
+    // Post-process images for Cloudinary/legacy
     const topProducts = (result.items || []).map(p => {
-      let img = p.image;
-
-      // Normalize paths: replace backslashes with forward slashes
-      if (img) {
-        img = img.replace(/\\/g, "/");
-      }
+      let img = buildFileUrl(req, p.image);
 
       // If image is missing or is a video, fallback to first gallery item
       if (!img || img.endsWith(".mp4")) {
-        img = (p.gallery && p.gallery.length > 0) ? p.gallery[0].replace(/\\/g, "/") : null;
+        const firstGallery = p.gallery && p.gallery.length > 0 ? p.gallery[0] : null;
+        img = firstGallery ? buildFileUrl(req, firstGallery) : null;
       }
 
-      // Build absolute URLs
-      const baseUrl = process.env.BASE_URL || "";
-      const imageUrl = img ? baseUrl + img : null;
-      const galleryUrls = (p.gallery || []).map(g => baseUrl + g.replace(/\\/g, "/"));
+      const galleryUrls = (p.gallery || []).map(g => buildFileUrl(req, g));
 
       return {
         ...p,
-        image: imageUrl,
+        image: img,
         gallery: galleryUrls
       };
     });
@@ -424,13 +471,24 @@ exports.getAllWishlistsAdmin = async (req, res) => {
         .skip(skip)
         .limit(limit)
         .populate({ path: "user", select: "name email" })
-        .populate({ path: "products.product", select: "name slug price image category brand status" })
+        .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
         .populate({ path: "products.seller", select: "shopName user" }),
       Wishlist.countDocuments({}),
     ]);
 
-    // Normalize each wishlist in the response
-    const normalizedItems = items.map(wishlist => normalizeWishlistResponse(wishlist));
+    // Normalize each wishlist and images in the response
+    const normalizedItems = items.map(wishlist => {
+      const normalized = normalizeWishlistResponse(wishlist);
+      normalized.products = normalized.products.map(item => {
+        const productItem = item;
+        productItem.image = buildFileUrl(req, productItem.image);
+        if (productItem.gallery) {
+          productItem.gallery = productItem.gallery.map(g => buildFileUrl(req, g));
+        }
+        return productItem;
+      });
+      return normalized;
+    });
 
     return res.status(200).json({
       page,
@@ -524,30 +582,25 @@ exports.getTopWishlistedProductsAdmin = async (req, res) => {
 
     const rawItems = await Wishlist.aggregate(pipeline);
 
-    // ✅ Normalize image + gallery
-    const baseUrl = process.env.BASE_URL || "";
+    // ✅ Normalize image + gallery for Cloudinary/legacy
     const items = rawItems.map((p) => {
-      let img = p.image;
-
-      // Normalize path slashes
-      if (img) img = img.replace(/\\/g, "/");
+      let img = buildFileUrl(req, p.image);
 
       // If it's missing or a video, fallback to first gallery image
       if (!img || img.endsWith(".mp4")) {
         img =
           p.gallery && p.gallery.length > 0
-            ? p.gallery[0].replace(/\\/g, "/")
+            ? buildFileUrl(req, p.gallery[0])
             : null;
       }
 
-      const imageUrl = img ? baseUrl + img : null;
       const galleryUrls = (p.gallery || []).map(
-        (g) => baseUrl + g.replace(/\\/g, "/")
+        (g) => buildFileUrl(req, g)
       );
 
       return {
         ...p,
-        image: imageUrl,
+        image: img,
         gallery: galleryUrls,
       };
     });

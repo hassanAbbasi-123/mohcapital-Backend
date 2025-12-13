@@ -1,15 +1,17 @@
+// Updated profileController.js
 // controllers/profileController.js
 const mongoose = require("mongoose");
 const { User, SellerProfile } = require("../models/indexModel");
+const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper
 
 /**
- * Helper: Build full URL for a saved filepath.
- * Uses SERVER_URL env var if available, otherwise falls back to request's host.
+ * Helper: No longer needed for Cloudinary URLs, but kept for backward compatibility if any local paths remain.
  */
 const buildFileUrl = (req, filepath) => {
   if (!filepath) return "";
+  // If it's already a full URL (Cloudinary), return as-is
+  if (/^https?:\/\//i.test(filepath)) return filepath;
   const serverUrl = process.env.SERVER_URL || `${req.protocol}://${req.get("host")}`;
-  // Normalize Windows backslashes to forward slashes
   const normalized = filepath.replace(/\\/g, "/").replace(/^\/+/g, "");
   return `${serverUrl}/${normalized}`;
 };
@@ -23,7 +25,7 @@ exports.getProfile = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // If avatar is a stored relative path, convert to full URL
+    // If avatar is a stored relative path, convert to full URL (for legacy)
     if (user.avatar && typeof user.avatar === "string" && !/^https?:\/\//i.test(user.avatar)) {
       user.avatar = buildFileUrl(req, user.avatar);
     }
@@ -46,6 +48,15 @@ exports.getProfile = async (req, res) => {
               ? buildFileUrl(req, docPath)
               : docPath
           );
+        }
+        // Handle kyc.documents if present
+        if (sellerProfile.kyc && Array.isArray(sellerProfile.kyc.documents)) {
+          sellerProfile.kyc.documents = sellerProfile.kyc.documents.map((doc) => ({
+            ...doc,
+            url: typeof doc.url === "string" && !/^https?:\/\//i.test(doc.url)
+              ? buildFileUrl(req, doc.url)
+              : doc.url
+          }));
         }
       }
     }
@@ -125,15 +136,19 @@ exports.updateProfile = async (req, res) => {
       if (businessAddress !== undefined)
         sellerUpdateData.address = businessAddress;
 
-      // Handle file uploads (logo & documents)
+      // Handle file uploads (logo & documents) to Cloudinary
       if (req.files?.logo && req.files.logo.length > 0) {
-        const savedPath = req.files.logo[0].path;
-        sellerUpdateData.logo = savedPath;
+        const uploadResult = await uploadToCloudinary(req.files.logo[0], req);
+        sellerUpdateData.logo = uploadResult.secure_url;
       }
 
       if (req.files?.documents && req.files.documents.length > 0) {
-        const docPaths = req.files.documents.map((file) => file.path);
-        sellerUpdateData.documents = docPaths;
+        const docUrls = [];
+        for (const file of req.files.documents) {
+          const uploadResult = await uploadToCloudinary(file, req);
+          docUrls.push(uploadResult.secure_url);
+        }
+        sellerUpdateData.documents = docUrls;
       }
 
       // Upsert the seller profile
@@ -147,7 +162,7 @@ exports.updateProfile = async (req, res) => {
         updatedSellerProfile = await SellerProfile.findOne({ user: userId });
       }
 
-      // Convert stored paths to accessible URLs for the response
+      // Convert stored paths to accessible URLs for the response (for legacy)
       if (updatedSellerProfile) {
         if (
           updatedSellerProfile.logo &&
@@ -185,7 +200,7 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-// Change password
+// Change password (unchanged)
 exports.changePassword = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -229,13 +244,14 @@ exports.uploadProfilePicture = async (req, res) => {
       return res.status(400).json({ message: "No file uploaded" });
     }
 
-    // Build full URL to return to client
-    const imageUrl = buildFileUrl(req, req.file.path);
+    // Upload to Cloudinary
+    const uploadResult = await uploadToCloudinary(req.file, req);
+    const imageUrl = uploadResult.secure_url;
 
     // Update only the user's avatar field
     await User.findByIdAndUpdate(
       userId,
-      { avatar: req.file.path },
+      { avatar: imageUrl },
       { new: true, runValidators: true }
     );
 
@@ -250,4 +266,3 @@ exports.uploadProfilePicture = async (req, res) => {
     });
   }
 };
-

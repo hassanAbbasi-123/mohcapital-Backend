@@ -1,3 +1,4 @@
+// Updated leadController.js (only the uploadPaymentProof function needs changes; others remain the same)
 const Lead = require("../models/leadModel");
 const LeadPurchase = require("../models/LeadPurchase");
 const Conversation = require("../models/chatmodel/conversationModel");
@@ -7,8 +8,7 @@ const mongoose = require("mongoose");
 const Razorpay = require('razorpay');
 const axios = require("axios");
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
+const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper
 
 // Initialize Razorpay
 const razorpay = new Razorpay({
@@ -131,19 +131,11 @@ exports.uploadPaymentProof = async (req, res) => {
       });
     }
 
-    // ✅ FIXED: Generate proper URL path
-    // The file is saved to: uploads/leads/payment-proofs/
-    // We need to create URL: /uploads/leads/payment-proofs/filename.ext
-    
-    const baseDir = "uploads/leads/payment-proofs/";
-    const filename = req.file.filename;
-    
-    // Create URL path (relative to server root)
-    const paymentProofUrl = `/uploads/leads/payment-proofs/${filename}`;
+    // ✅ Upload to Cloudinary
+    const uploadResult = await uploadToCloudinary(req.file, req);
+    const paymentProofUrl = uploadResult.secure_url;
     
     console.log("📸 Generated payment proof URL:", paymentProofUrl);
-    console.log("📁 Full server path:", path.join(process.cwd(), baseDir, filename));
-    console.log("📁 File exists:", fs.existsSync(path.join(process.cwd(), baseDir, filename)));
 
     // Update purchase with payment details
     purchase.payment_proof = paymentProofUrl;
@@ -165,19 +157,14 @@ exports.uploadPaymentProof = async (req, res) => {
         payment_proof: paymentProofUrl,
         payment_status: purchase.payment_status,
         payment_date: purchase.payment_date,
-        notes: purchase.notes
       }
     });
-
   } catch (error) {
-    console.error("❌ ERROR in uploadPaymentProof:", error);
-    console.error("❌ Error stack:", error.stack);
-    
-    res.status(500).json({
-      success: false,
-      message: "Failed to upload payment screenshot",
-      error: error.message,
-      details: "Please try again or contact support if the issue persists."
+    console.error("❌ Error in uploadPaymentProof:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to upload payment proof", 
+      error: error.message 
     });
   }
 };
@@ -983,7 +970,7 @@ exports.verifyPayment = async (req, res) => {
   }
 };
 
-// ── ADMIN: Get Pending Payments ───────────────────────────
+// ── ADMIN: Get Pending Payments ─────────────────────────── (unchanged)
 exports.getPendingPayments = async (req, res) => {
   try {
     if (req.user.role !== "admin") {
