@@ -1,7 +1,7 @@
+// Updated bannerController.js
 // backend/controllers/bannerController.js
 const Banner = require("../models/bannerModel");
-const fs = require("fs");
-const path = require("path");
+const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper
 
 // ==============================
 // Get All Banners (Admin)
@@ -34,10 +34,12 @@ const createBanner = async (req, res) => {
   try {
     const { title, subtitle, cta, bgColor, overlay, textColor, status } = req.body;
 
-    // Ensure image path consistency with multer
-    const image = req.file
-      ? `/uploads/banners/images/${req.file.filename}`
-      : "";
+    // Ensure image upload to Cloudinary
+    let image = "";
+    if (req.file) {
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      image = uploadResult.secure_url;
+    }
 
     if (!image) {
       return res.status(400).json({ message: "Image is required" });
@@ -72,15 +74,10 @@ const updateBanner = async (req, res) => {
     let image = req.body.image; // Keep existing image if not replaced
 
     if (req.file) {
-      const banner = await Banner.findById(id);
-      if (banner && banner.image) {
-        const oldImagePath = path.join(__dirname, "..", "..", banner.image);
-        if (fs.existsSync(oldImagePath)) {
-          fs.unlinkSync(oldImagePath);
-        }
-      }
-
-      image = `/uploads/banners/images/${req.file.filename}`;
+      // TODO: Optionally delete old image from Cloudinary if you store public_id
+      // For now, just upload new one
+      const uploadResult = await uploadToCloudinary(req.file, req);
+      image = uploadResult.secure_url;
     }
 
     const updatedBanner = await Banner.findByIdAndUpdate(
@@ -120,12 +117,8 @@ const deleteBanner = async (req, res) => {
       return res.status(404).json({ message: "Banner not found" });
     }
 
-    if (banner.image) {
-      const imagePath = path.join(__dirname, "..", "..", banner.image);
-      if (fs.existsSync(imagePath)) {
-        fs.unlinkSync(imagePath);
-      }
-    }
+    // TODO: Optionally delete image from Cloudinary if you store public_id
+    // For now, just remove from DB
 
     await Banner.findByIdAndDelete(id);
     res.status(200).json({ message: "Banner deleted successfully" });

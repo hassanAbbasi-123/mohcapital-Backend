@@ -1,8 +1,10 @@
+// Updated authController.js
 // controllers/authController.js
 const { Customer } = require("../models/accountModel");
 const mongoose = require("mongoose");
 const { User } = require("../models/indexModel"); // Only User is needed now
 const jwt = require("jsonwebtoken");
+const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper
 
 const generateToken = (id, role) => {
   return jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -63,7 +65,12 @@ exports.register = async (req, res) => {
       if (legacy) return res.status(400).json({ message: "Store name or GSTIN already exists in legacy profile" });
     }
 
-    const logo = req.files?.logo?.[0]?.path || "";
+    // Upload logo to Cloudinary
+    let logo = "";
+    if (req.files?.logo?.[0]) {
+      const uploadResult = await uploadToCloudinary(req.files.logo[0], req);
+      logo = uploadResult.secure_url;
+    }
 
     let documentTypes = [];
     if (req.body.documentTypes) {
@@ -76,7 +83,12 @@ exports.register = async (req, res) => {
     }
 
     const uploadedDocs = req.files?.documents || [];
-    const kycDocuments = uploadedDocs.map(f => f.path);
+    // Upload documents to Cloudinary
+    const kycDocuments = [];
+    for (const file of uploadedDocs) {
+      const uploadResult = await uploadToCloudinary(file, req);
+      kycDocuments.push(uploadResult.secure_url);
+    }
 
     const session = await mongoose.startSession();
     session.startTransaction();
