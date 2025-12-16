@@ -116,19 +116,31 @@ exports.addToCart = async (req, res) => {
         .json({ message: "Invalid product ID or quantity" });
     }
 
+    // Find product without populating seller yet
     const product = await Product.findById(productId)
-      .select("name price image gallery seller inStock status quantity")
-      .populate("seller", "storeName logo user isVerified");
+      .select("name price image gallery seller inStock status quantity");
+
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    if (!product.seller || !product.seller._id) {
-      return res.status(400).json({
-        message: `Product ${productId} does not have a valid seller`,
-      });
+    // Resolve correct SellerProfile _id (backward compatibility)
+    let sellerId = product.seller;
+    let sellerProfile = await SellerProfile.findById(sellerId);
+
+    if (!sellerProfile) {
+      // Fallback: seller field might store User ID directly
+      sellerProfile = await SellerProfile.findOne({ user: sellerId });
+      if (sellerProfile) {
+        sellerId = sellerProfile._id;
+      } else {
+        return res.status(400).json({
+          message: `Product ${productId} does not have a valid seller`,
+        });
+      }
     }
-    if (!product.seller.isVerified) {
+
+    if (!sellerProfile.isVerified) {
       return res.status(403).json({ message: "Seller is not verified" });
     }
 
@@ -159,7 +171,7 @@ exports.addToCart = async (req, res) => {
     } else {
       cart.items.push({
         product: product._id,
-        Seller: product.seller._id,
+        Seller: sellerId,
         quantity: Number(quantity),
         price: product.price,
       });
@@ -178,7 +190,10 @@ exports.addToCart = async (req, res) => {
   }
 };
 
-// 3. Update Quantity
+// The rest of the file remains exactly the same
+// (updateCartItem, removeCartItem, clearCart, applyCouponToCart,
+// removeCouponFromCart, getCartCount, seller & admin functions)
+
 exports.updateCartItem = async (req, res) => {
   try {
     const { cartItemId, quantity } = req.body;
@@ -220,7 +235,6 @@ exports.updateCartItem = async (req, res) => {
   }
 };
 
-// 4. Remove Item
 exports.removeCartItem = async (req, res) => {
   try {
     const { cartItemId } = req.body;
@@ -250,7 +264,6 @@ exports.removeCartItem = async (req, res) => {
   }
 };
 
-// 5. Clear Cart
 exports.clearCart = async (req, res) => {
   try {
     let cart = await Cart.findOneAndUpdate(
@@ -272,7 +285,6 @@ exports.clearCart = async (req, res) => {
   }
 };
 
-// 6. Apply Coupon
 exports.applyCouponToCart = async (req, res) => {
   try {
     const { code } = req.body;
@@ -281,18 +293,16 @@ exports.applyCouponToCart = async (req, res) => {
     if (!code)
       return res.status(400).json({ message: "Coupon code is required" });
 
-    // Find cart and populate necessary fields
     let cart = await Cart.findOne({ user: req.user._id })
       .populate("items.product")
-      .populate("coupon"); // Populate coupon if it exists
+      .populate("coupon");
     
     console.log("🔍 Found cart:", cart ? cart._id : "No cart found");
     
     if (!cart) return res.status(404).json({ message: "Cart not found" });
 
-    // Find active coupon
     const coupon = await Coupon.findOne({ 
-      code: code.toUpperCase().trim(), // Normalize the code
+      code: code.toUpperCase().trim(),
       isActive: true 
     });
     
@@ -301,24 +311,19 @@ exports.applyCouponToCart = async (req, res) => {
     if (!coupon)
       return res.status(404).json({ message: "❌ Invalid or inactive coupon" });
 
-    // Check if coupon is already applied
     if (cart.coupon && cart.coupon._id.toString() === coupon._id.toString()) {
       return res.status(400).json({ message: "❌ This coupon is already applied" });
     }
 
-    // Apply coupon to cart
     cart.coupon = coupon._id;
     console.log("🔍 Applied coupon to cart:", cart.coupon);
 
-    // Recalculate cart with discount
     cart = await recalcCartDiscount(cart);
     console.log("🔍 Recalculated cart discount:", cart.discount);
 
-    // Save the cart with the applied coupon
     await cart.save();
     console.log("✅ Cart saved successfully");
 
-    // Populate the cart with all necessary data including the coupon
     const populatedCart = await Cart.findById(cart._id)
       .populate("items.product")
       .populate("coupon");
@@ -341,7 +346,6 @@ exports.applyCouponToCart = async (req, res) => {
   }
 };
 
-// 7. Remove Coupon
 exports.removeCouponFromCart = async (req, res) => {
   try {
     let cart = await Cart.findOne({ user: req.user._id });
@@ -361,7 +365,7 @@ exports.removeCouponFromCart = async (req, res) => {
       .json({ message: "Error removing coupon", error: err.message });
   }
 };
-// 8. Get Cart Count (for navbar)
+
 exports.getCartCount = async (req, res) => {
   try {
     const cart = await Cart.findOne({ user: req.user._id });
@@ -393,7 +397,6 @@ exports.getCartCount = async (req, res) => {
 
 // ====================== SELLER SIDE ======================
 
-// View Cart Insights (products in carts)
 exports.getSellerCartInsights = async (req, res) => {
   try {
     const seller = await SellerProfile.findOne({ user: req.user._id });
@@ -439,7 +442,6 @@ exports.getSellerCartInsights = async (req, res) => {
 
 // ====================== ADMIN SIDE ======================
 
-// View all carts
 exports.getAllCarts = async (req, res) => {
   try {
     const carts = await Cart.find()
@@ -463,7 +465,6 @@ exports.getAllCarts = async (req, res) => {
   }
 };
 
-// Top Sellers by Cart Activity
 exports.getTopSellersByCart = async (req, res) => {
   try {
     const topSellers = await Cart.aggregate([
@@ -502,7 +503,6 @@ exports.getTopSellersByCart = async (req, res) => {
   }
 };
 
-// Top Products by Cart Adds
 exports.getTopProductsByCart = async (req, res) => {
   try {
     const topProducts = await Cart.aggregate([
@@ -542,7 +542,6 @@ exports.getTopProductsByCart = async (req, res) => {
   }
 };
 
-// Revenue Projection
 exports.getRevenueProjection = async (req, res) => {
   try {
     const projection = await Cart.aggregate([

@@ -188,8 +188,6 @@ const createProduct = async (req, res) => {
       harvestDate,
       bestBefore,
       storageInstructions,
-      features,
-      attributes,
       isSeasonal,
     } = req.body;
 
@@ -244,8 +242,6 @@ const createProduct = async (req, res) => {
       harvestDate: harvestDate ? new Date(harvestDate) : undefined,
       bestBefore: new Date(bestBefore),
       storageInstructions,
-      features: features ? JSON.parse(features) : [],
-      attributes: attributes ? JSON.parse(attributes) : {},
       isSeasonal: isSeasonal === "true",
       image,
       gallery,
@@ -301,13 +297,11 @@ const updateOwnProduct = async (req, res) => {
       "name", "description", "category", "price", "originalPrice", "discount",
       "quantity", "minOrderQuantity", "unit", "variety", "weight",
       "isOrganic", "harvestDate", "bestBefore", "storageInstructions",
-      "features", "attributes", "isSeasonal"
+      "isSeasonal"
     ];
     allowedFields.forEach(field => {
       if (updates[field] !== undefined) {
-        if (field === "features" || field === "attributes") {
-          product[field] = JSON.parse(updates[field]);
-        } else if (["price", "originalPrice", "discount", "quantity", "minOrderQuantity", "weight"].includes(field)) {
+        if (["price", "originalPrice", "discount", "quantity", "minOrderQuantity", "weight"].includes(field)) {
           product[field] = parseFloat(updates[field]);
         } else if (["isOrganic", "isSeasonal"].includes(field)) {
           product[field] = updates[field] === "true";
