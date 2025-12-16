@@ -1,16 +1,29 @@
-// models/userModel.js
+// models/userModel.js (FULLY UPDATED - no lines skipped, added emailVerified + expanded sellerSubSchema for full sync with SellerProfile)
 const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
 
 const sellerSubSchema = new mongoose.Schema({
   storeName: { type: String },
+  storeDescription: { type: String },
   logo: { type: String },
   gstin: { type: String },
+  pan: { type: String },
   businessType: { type: String, enum: ["individual","trader","fpo","cooperative","mill","exporter","processor"], default: "trader" },
-  city: String,
-  state: String,
+  location: {
+    address: { type: String },
+    city: { type: String },
+    state: { type: String },
+    pincode: { type: String },
+    district: { type: String },
+  },
   kycStatus: { type: String, enum: ["pending","approved","rejected"], default: "pending" },
-  documents: [{ type: String }],          
+  documents: [
+    {
+      type: { type: String },
+      url: { type: String, required: true },
+      uploadedAt: { type: Date, default: Date.now },
+    }
+  ],
   verifiedAt: Date,
 });
 
@@ -19,14 +32,12 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
   role: { type: String, enum: ["admin","seller","user"], default: "user" },
-
   phone: { type: String, unique: true, sparse: true, match: [/^\d{10}$/] },
   aadhaar: { type: String, match: [/^\d{12}$/], sparse: true },
-
-  // <-- NEW: embed seller data directly on User (mirrors old SellerProfile)
+  // Embedded seller data (now fully synced with SellerProfile fields)
   seller: sellerSubSchema,
-
   isActive: { type: Boolean, default: true },
+  emailVerified: { type: Boolean, default: true }, // default true for backward compatibility with existing users
 }, { timestamps: true });
 
 userSchema.pre("save", async function (next) {

@@ -95,7 +95,6 @@ function normalizeWishlistResponse(wishlist) {
  */
 exports.addToWishlist = async (req, res) => {
   try {
-    // Use authenticated user id; optional fallback if route passes userId param
     const targetUserId = req.params.userId || req.user._id;
     assertUserOrAdmin(req, targetUserId);
 
@@ -104,32 +103,32 @@ exports.addToWishlist = async (req, res) => {
       return res.status(400).json({ message: "productId is required" });
     }
 
-    // Validate product and get seller from product
     const product = await Product.findById(productId).select("_id seller status");
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    const sellerId = product.seller;
-    if (!sellerId) return res.status(400).json({ message: "Product has no seller assigned" });
+    // Resolve correct SellerProfile _id (backward compatibility)
+    let sellerId = product.seller;
+    let sellerProfile = await SellerProfile.findById(sellerId);
 
-    // Validate seller exists
-    const seller = await SellerProfile.findById(sellerId).select("_id");
-    if (!seller) return res.status(404).json({ message: "Seller not found" });
+    if (!sellerProfile) {
+      // Fallback: seller field might store User ID directly
+      sellerProfile = await SellerProfile.findOne({ user: sellerId });
+      if (!sellerProfile) {
+        return res.status(404).json({ message: "Seller not found" });
+      }
+      sellerId = sellerProfile._id;
+    }
 
-    // Create or fetch wishlist
     const wishlist = await ensureWishlist(targetUserId);
 
-    // Check if product already exists in wishlist
     const idx = wishlist.products.findIndex((p) => String(p.product) === String(productId));
 
     if (idx > -1) {
-      // Already present
       if (wishlist.products[idx].status === "active") {
-        // Return populated wishlist to client
         const populated = await Wishlist.findById(wishlist._id)
           .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
           .populate({ path: "products.seller", select: "shopName user" });
         
-        // Normalize images in populated products for Cloudinary/legacy
         const normalizedWishlist = normalizeWishlistResponse(populated);
         normalizedWishlist.products = normalizedWishlist.products.map(item => {
           const productItem = item;
@@ -142,12 +141,11 @@ exports.addToWishlist = async (req, res) => {
 
         return res.status(200).json({ message: "Already in wishlist", wishlist: normalizedWishlist });
       }
-      // Was removed before → restore (soft)
+      // Soft restore
       wishlist.products[idx].status = "active";
       wishlist.products[idx].addedAt = new Date();
       wishlist.products[idx].seller = sellerId;
     } else {
-      // New entry
       wishlist.products.push({
         product: productId,
         seller: sellerId,
@@ -162,7 +160,6 @@ exports.addToWishlist = async (req, res) => {
       .populate({ path: "products.product", select: "name slug price image category brand status gallery" })
       .populate({ path: "products.seller", select: "shopName user" });
 
-    // Normalize images in populated products for Cloudinary/legacy
     const normalizedWishlist = normalizeWishlistResponse(populated);
     normalizedWishlist.products = normalizedWishlist.products.map(item => {
       const productItem = item;
