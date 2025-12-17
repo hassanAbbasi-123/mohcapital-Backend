@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+// ========== SCHEMA DEFINITIONS ==========
+
+// Customer Schema
 const customerSchema = new mongoose.Schema({
   customerId: {
     type: String,
@@ -213,6 +216,38 @@ const purchaseItemSchema = new mongoose.Schema({
   profit: {
     type: Number,
     default: 0
+  },
+  // Commission for individual items
+  commissionApplied: {
+    type: Boolean,
+    default: false
+  },
+  commissionCandidates: [{
+    candidateType: {
+      type: String,
+      enum: ['exporter', 'worker', 'delivery', 'agent', 'broker', 'other'],
+      required: true
+    },
+    candidateName: {
+      type: String,
+      required: function() {
+        return this.candidateType === 'other';
+      }
+    },
+    commissionRate: {
+      type: Number,
+      required: true,
+      min: 0,
+      max: 100
+    },
+    commissionAmount: {
+      type: Number,
+      default: 0
+    }
+  }],
+  totalCommission: {
+    type: Number,
+    default: 0
   }
 });
 
@@ -260,6 +295,37 @@ const transactionSchema = new mongoose.Schema({
   
   // For purchase transactions
   items: [purchaseItemSchema],
+  
+  // Purchase-level commission (if any)
+  purchaseCommission: {
+    totalCommission: {
+      type: Number,
+      default: 0
+    },
+    commissionCandidates: [{
+      candidateType: {
+        type: String,
+        enum: ['exporter', 'worker', 'delivery', 'agent', 'broker', 'other'],
+        required: true
+      },
+      candidateName: {
+        type: String,
+        required: function() {
+          return this.candidateType === 'other';
+        }
+      },
+      commissionRate: {
+        type: Number,
+        required: true,
+        min: 0,
+        max: 100
+      },
+      commissionAmount: {
+        type: Number,
+        default: 0
+      }
+    }]
+  },
   
   // For stock purchase transactions
   stockPurchase: {
@@ -323,10 +389,18 @@ const transactionSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// ========== INDEXES ==========
+
 // Indexes for better performance
 transactionSchema.index({ customer: 1, createdAt: -1 });
 transactionSchema.index({ type: 1 });
+inventorySchema.index({ productId: 1 });
 inventorySchema.index({ category: 1 });
+customerSchema.index({ customerId: 1 });
+customerSchema.index({ phone: 1 });
+stockPurchaseSchema.index({ inventory: 1 });
+
+// ========== MIDDLEWARE ==========
 
 // Hash password before saving
 customerSchema.pre('save', async function(next) {
@@ -340,6 +414,8 @@ customerSchema.methods.correctPassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
+// ========== MODEL CREATION ==========
+
 // Check if models already exist before creating them
 const Customer = mongoose.models.Customer || mongoose.model('Customer', customerSchema);
 const Transaction = mongoose.models.Transaction || mongoose.model('Transaction', transactionSchema);
@@ -350,5 +426,5 @@ module.exports = {
   Customer, 
   Transaction, 
   Inventory, 
-  StockPurchase 
+  StockPurchase
 };
