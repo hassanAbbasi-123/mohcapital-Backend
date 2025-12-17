@@ -18,7 +18,7 @@ router.delete("/admin/customers/:id", isAdmin, accountController.deleteCustomer)
 router.patch("/admin/customers/:id/toggle-status", isAdmin, accountController.toggleCustomerStatus);
 router.get("/admin/customers/:id/ledger", isAdmin, accountController.getCustomerLedger);
 router.post("/admin/customers/:id/purchases", isAdmin, accountController.createPurchase);
-router.put("/admin/customers/:id/purchases/:transactionId", isAdmin, accountController.updatePurchase); // NEW: Update purchase
+router.put("/admin/customers/:id/purchases/:transactionId", isAdmin, accountController.updatePurchase);
 router.post("/admin/customers/:id/payments", isAdmin, accountController.makePayment);
 
 // Inventory Management

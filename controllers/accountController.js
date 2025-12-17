@@ -746,13 +746,19 @@ exports.addReminder = async (req, res) => {
   }
 };
 
-// ✅ UPDATED: Create purchase with inventory management and dynamic selling price
+// ✅ UPDATED: Create purchase with inventory management, dynamic selling price, and commission support
 exports.createPurchase = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const { items, totalAmount, paidAmount = 0, note } = req.body;
+    const { 
+      items, 
+      totalAmount, 
+      paidAmount = 0, 
+      note,
+      commissionCandidates = [] // New: commission candidates array
+    } = req.body;
     const customerId = req.params.id;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -789,10 +795,47 @@ exports.createPurchase = async (req, res) => {
     }
 
     let totalProfit = 0;
+    let totalCommission = 0;
     const purchaseItems = [];
 
+    // Process commission candidates
+    const processedCommissionCandidates = [];
+    if (commissionCandidates && commissionCandidates.length > 0) {
+      for (const commission of commissionCandidates) {
+        if (commission.candidateType && commission.commissionRate > 0) {
+          // Validate commission rate
+          if (commission.commissionRate < 0 || commission.commissionRate > 100) {
+            await session.abortTransaction();
+            return res.status(400).json({ 
+              status: 'error',
+              message: 'Commission rate must be between 0 and 100' 
+            });
+          }
+
+          // Validate candidateName for 'other' type
+          if (commission.candidateType === 'other' && !commission.candidateName) {
+            await session.abortTransaction();
+            return res.status(400).json({ 
+              status: 'error',
+              message: 'Candidate name is required for "other" type' 
+            });
+          }
+
+          const commissionAmount = (totalAmount * commission.commissionRate) / 100;
+          totalCommission += commissionAmount;
+          
+          processedCommissionCandidates.push({
+            candidateType: commission.candidateType,
+            candidateName: commission.candidateName || '',
+            commissionRate: commission.commissionRate,
+            commissionAmount
+          });
+        }
+      }
+    }
+
     for (const item of items) {
-      const { inventoryId, quantity, unit, sellingPrice } = item;
+      const { inventoryId, quantity, unit, sellingPrice, itemCommissionCandidates = [] } = item;
 
       if (!inventoryId || !quantity || !unit || !sellingPrice) {
         await session.abortTransaction();
@@ -822,7 +865,46 @@ exports.createPurchase = async (req, res) => {
       );
 
       const itemTotal = quantity * sellingPrice;
+      let itemCommission = 0;
+      const itemCommissionDetails = [];
+
+      // Process item-level commission
+      if (itemCommissionCandidates && itemCommissionCandidates.length > 0) {
+        for (const commission of itemCommissionCandidates) {
+          if (commission.candidateType && commission.commissionRate > 0) {
+            // Validate commission rate
+            if (commission.commissionRate < 0 || commission.commissionRate > 100) {
+              await session.abortTransaction();
+              return res.status(400).json({ 
+                status: 'error',
+                message: 'Commission rate must be between 0 and 100' 
+              });
+            }
+
+            // Validate candidateName for 'other' type
+            if (commission.candidateType === 'other' && !commission.candidateName) {
+              await session.abortTransaction();
+              return res.status(400).json({ 
+                status: 'error',
+                message: 'Candidate name is required for "other" type' 
+              });
+            }
+
+            const commissionAmount = (itemTotal * commission.commissionRate) / 100;
+            itemCommission += commissionAmount;
+            
+            itemCommissionDetails.push({
+              candidateType: commission.candidateType,
+              candidateName: commission.candidateName || '',
+              commissionRate: commission.commissionRate,
+              commissionAmount
+            });
+          }
+        }
+      }
+
       totalProfit += result.profit;
+      totalCommission += itemCommission;
 
       purchaseItems.push({
         inventory: inventoryId,
@@ -833,13 +915,18 @@ exports.createPurchase = async (req, res) => {
         costPrice: inventory.costPrice,
         sellingPrice: sellingPrice,
         total: itemTotal,
-        profit: result.profit
+        profit: result.profit,
+        commissionApplied: itemCommissionDetails.length > 0,
+        commissionCandidates: itemCommissionDetails,
+        totalCommission: itemCommission
       });
     }
 
-    const remainingBalance = customer.currentBalance + (totalAmount - paidAmount);
+    // Apply commission to total amount if any
+    const finalTotalAmount = totalAmount - totalCommission;
+    const remainingBalance = customer.currentBalance + (finalTotalAmount - paidAmount);
     
-    customer.totalPurchases += totalAmount;
+    customer.totalPurchases += finalTotalAmount;
     customer.totalPayments += paidAmount;
     customer.currentBalance = remainingBalance;
 
@@ -848,11 +935,15 @@ exports.createPurchase = async (req, res) => {
     const transaction = await Transaction.create([{
       customer: customerId,
       type: 'purchase',
-      amount: totalAmount,
+      amount: finalTotalAmount,
       paidAmount,
       remainingBalance,
       note,
       items: purchaseItems,
+      purchaseCommission: {
+        totalCommission,
+        commissionCandidates: processedCommissionCandidates
+      },
       createdBy: req.user._id
     }], { session }).then(d => d[0]);
 
@@ -867,6 +958,7 @@ exports.createPurchase = async (req, res) => {
       data: {
         transaction,
         profit: totalProfit,
+        totalCommission,
         customer: {
           _id: customer._id,
           name: customer.name,
@@ -888,13 +980,19 @@ exports.createPurchase = async (req, res) => {
   }
 };
 
-// ✅ NEW: Update purchase transaction
+// ✅ UPDATED: Update purchase transaction with commission support
 exports.updatePurchase = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const { items, totalAmount, paidAmount = 0, note } = req.body;
+    const { 
+      items, 
+      totalAmount, 
+      paidAmount = 0, 
+      note,
+      commissionCandidates = [] 
+    } = req.body;
     const { id, transactionId } = req.params;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -943,9 +1041,10 @@ exports.updatePurchase = async (req, res) => {
     const oldItems = existingTransaction.items;
     const oldTotalAmount = existingTransaction.amount;
     const oldPaidAmount = existingTransaction.paidAmount;
+    const oldCommission = existingTransaction.purchaseCommission?.totalCommission || 0;
 
-    // Revert customer balance
-    customer.totalPurchases -= oldTotalAmount;
+    // Revert customer balance (add back old commission)
+    customer.totalPurchases -= (oldTotalAmount + oldCommission);
     customer.totalPayments -= oldPaidAmount;
     customer.currentBalance = customer.currentBalance - (oldTotalAmount - oldPaidAmount);
 
@@ -963,11 +1062,48 @@ exports.updatePurchase = async (req, res) => {
     }
 
     let totalProfit = 0;
+    let totalCommission = 0;
     const purchaseItems = [];
+
+    // Process new commission candidates
+    const processedCommissionCandidates = [];
+    if (commissionCandidates && commissionCandidates.length > 0) {
+      for (const commission of commissionCandidates) {
+        if (commission.candidateType && commission.commissionRate > 0) {
+          // Validate commission rate
+          if (commission.commissionRate < 0 || commission.commissionRate > 100) {
+            await session.abortTransaction();
+            return res.status(400).json({ 
+              status: 'error',
+              message: 'Commission rate must be between 0 and 100' 
+            });
+          }
+
+          // Validate candidateName for 'other' type
+          if (commission.candidateType === 'other' && !commission.candidateName) {
+            await session.abortTransaction();
+            return res.status(400).json({ 
+              status: 'error',
+              message: 'Candidate name is required for "other" type' 
+            });
+          }
+
+          const commissionAmount = (totalAmount * commission.commissionRate) / 100;
+          totalCommission += commissionAmount;
+          
+          processedCommissionCandidates.push({
+            candidateType: commission.candidateType,
+            candidateName: commission.candidateName || '',
+            commissionRate: commission.commissionRate,
+            commissionAmount
+          });
+        }
+      }
+    }
 
     // Process new items
     for (const item of items) {
-      const { inventoryId, quantity, unit, sellingPrice } = item;
+      const { inventoryId, quantity, unit, sellingPrice, itemCommissionCandidates = [] } = item;
 
       if (!inventoryId || !quantity || !unit || !sellingPrice) {
         await session.abortTransaction();
@@ -997,7 +1133,46 @@ exports.updatePurchase = async (req, res) => {
       );
 
       const itemTotal = quantity * sellingPrice;
+      let itemCommission = 0;
+      const itemCommissionDetails = [];
+
+      // Process item-level commission
+      if (itemCommissionCandidates && itemCommissionCandidates.length > 0) {
+        for (const commission of itemCommissionCandidates) {
+          if (commission.candidateType && commission.commissionRate > 0) {
+            // Validate commission rate
+            if (commission.commissionRate < 0 || commission.commissionRate > 100) {
+              await session.abortTransaction();
+              return res.status(400).json({ 
+                status: 'error',
+                message: 'Commission rate must be between 0 and 100' 
+              });
+            }
+
+            // Validate candidateName for 'other' type
+            if (commission.candidateType === 'other' && !commission.candidateName) {
+              await session.abortTransaction();
+              return res.status(400).json({ 
+                status: 'error',
+                message: 'Candidate name is required for "other" type' 
+              });
+            }
+
+            const commissionAmount = (itemTotal * commission.commissionRate) / 100;
+            itemCommission += commissionAmount;
+            
+            itemCommissionDetails.push({
+              candidateType: commission.candidateType,
+              candidateName: commission.candidateName || '',
+              commissionRate: commission.commissionRate,
+              commissionAmount
+            });
+          }
+        }
+      }
+
       totalProfit += result.profit;
+      totalCommission += itemCommission;
 
       purchaseItems.push({
         inventory: inventoryId,
@@ -1008,14 +1183,20 @@ exports.updatePurchase = async (req, res) => {
         costPrice: inventory.costPrice,
         sellingPrice: sellingPrice,
         total: itemTotal,
-        profit: result.profit
+        profit: result.profit,
+        commissionApplied: itemCommissionDetails.length > 0,
+        commissionCandidates: itemCommissionDetails,
+        totalCommission: itemCommission
       });
     }
 
-    // Update customer with new values
-    const remainingBalance = customer.currentBalance + (totalAmount - paidAmount);
+    // Apply commission to total amount if any
+    const finalTotalAmount = totalAmount - totalCommission;
     
-    customer.totalPurchases += totalAmount;
+    // Update customer with new values
+    const remainingBalance = customer.currentBalance + (finalTotalAmount - paidAmount);
+    
+    customer.totalPurchases += finalTotalAmount;
     customer.totalPayments += paidAmount;
     customer.currentBalance = remainingBalance;
 
@@ -1023,10 +1204,14 @@ exports.updatePurchase = async (req, res) => {
 
     // Update transaction
     existingTransaction.items = purchaseItems;
-    existingTransaction.amount = totalAmount;
+    existingTransaction.amount = finalTotalAmount;
     existingTransaction.paidAmount = paidAmount;
     existingTransaction.remainingBalance = remainingBalance;
     existingTransaction.note = note;
+    existingTransaction.purchaseCommission = {
+      totalCommission,
+      commissionCandidates: processedCommissionCandidates
+    };
     existingTransaction.updatedAt = new Date();
 
     await existingTransaction.save({ session });
@@ -1042,6 +1227,7 @@ exports.updatePurchase = async (req, res) => {
       data: {
         transaction: existingTransaction,
         profit: totalProfit,
+        totalCommission,
         customer: {
           _id: customer._id,
           name: customer.name,
@@ -1229,16 +1415,28 @@ exports.getProfitLossReport = async (req, res) => {
     let totalExpenses = 0;
     let totalCommissions = 0;
     let totalDamages = 0;
+    let totalPurchaseCommission = 0; // New: commission deducted from purchases
 
     // Calculate from transactions
     for (const transaction of transactions) {
       switch (transaction.type) {
         case 'purchase':
-          totalRevenue += transaction.amount;
+          // Add back commission to get original revenue
+          const originalRevenue = transaction.amount + (transaction.purchaseCommission?.totalCommission || 0);
+          totalRevenue += originalRevenue;
+          
           // Cost is calculated from items
           const purchaseCost = transaction.items.reduce((sum, item) => 
             sum + (item.quantity * item.costPrice), 0);
           totalCost += purchaseCost;
+          
+          // Add purchase commission to total commissions
+          totalPurchaseCommission += (transaction.purchaseCommission?.totalCommission || 0);
+          
+          // Also add item-level commissions
+          const itemCommissions = transaction.items.reduce((sum, item) => 
+            sum + (item.totalCommission || 0), 0);
+          totalPurchaseCommission += itemCommissions;
           break;
 
         case 'stock_purchase':
@@ -1258,14 +1456,13 @@ exports.getProfitLossReport = async (req, res) => {
           break;
 
         case 'bully_purchase':
-          // Bully purchases are at cost, so no profit/loss
           totalCost += transaction.amount;
           break;
       }
     }
 
     const grossProfit = totalRevenue - totalCost;
-    const netProfit = grossProfit - totalExpenses + totalCommissions - totalDamages;
+    const netProfit = grossProfit - totalExpenses + totalCommissions - totalDamages - totalPurchaseCommission;
 
     res.status(200).json({
       status: 'success',
@@ -1277,6 +1474,7 @@ exports.getProfitLossReport = async (req, res) => {
           totalExpenses,
           totalCommissions,
           totalDamages,
+          totalPurchaseCommission,
           netProfit
         },
         summary: {
