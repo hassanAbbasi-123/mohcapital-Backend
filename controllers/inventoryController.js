@@ -178,7 +178,7 @@ const getStockHistory = async (req, res) => {
 // Get all inventory (across all sellers)
 const getAllInventory = async (req, res) => {
   try {
-    // Assuming admin role is checked via middleware
+   
 
     let products = await Product.find({})
       .select("name slug price quantity inStock lowStockThreshold lastStockUpdate seller category brand")
