@@ -175,39 +175,77 @@ const getStockHistory = async (req, res) => {
 // ADMIN FUNCTIONS
 
 // Get all inventory (across all sellers)
+// Get all inventory (across all sellers)
 const getAllInventory = async (req, res) => {
   try {
     // Assuming admin role is checked via middleware
 
-    const products = await Product.find({})
-      .select("name slug price quantity inStock lowStockThreshold lastStockUpdate seller")
-      .populate({
-        path: "seller",
-        select: "storeName",
-        populate: { path: "user", select: "name email" }, // Get seller details
-      })
+    let products = await Product.find({})
+      .select("name slug price quantity inStock lowStockThreshold lastStockUpdate seller category brand")
       .populate("category", "name")
       .populate("brand", "name")
-      .sort({ quantity: 1 });
+      .sort({ quantity: 1 })
+      .lean();
+
+    // Get all unique seller IDs (as strings)
+    const sellerIds = [...new Set(products.map(p => p.seller ? p.seller.toString() : null).filter(Boolean))];
+
+    let sellerMap = new Map();
+
+    if (sellerIds.length > 0) {
+      // Fetch all relevant seller profiles (either by _id or by user _id)
+      const sellerProfiles = await SellerProfile.find({
+        $or: [
+          { _id: { $in: sellerIds } },
+          { user: { $in: sellerIds } }
+        ]
+      })
+        .populate("user", "name email")
+        .lean();
+
+      // Build maps: profile _id → info AND user _id → info
+      sellerProfiles.forEach(sp => {
+        const info = {
+          storeName: sp.storeName,
+          user: sp.user ? { _id: sp.user._id, name: sp.user.name, email: sp.user.email } : null
+        };
+        sellerMap.set(sp._id.toString(), info);
+        if (sp.user) {
+          sellerMap.set(sp.user._id.toString(), info);
+        }
+      });
+    }
+
+    // Assign seller info to each product
+    products = products.map(p => {
+      if (p.seller) {
+        const sid = p.seller.toString();
+        const info = sellerMap.get(sid);
+        p.seller = info || { storeName: "Unknown Seller", user: null };
+      } else {
+        p.seller = { storeName: "No Seller", user: null };
+      }
+      return p;
+    });
 
     // Aggregations for overview
     const totalProducts = products.length;
-    const totalStockValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
-    const lowStockItems = products.filter(p => p.quantity <= (p.lowStockThreshold || 10));
+    const totalStockValue = products.reduce((sum, p) => sum + ((p.quantity || 0) * (p.price || 0)), 0);
+    const lowStockItems = products.filter(p => (p.quantity || 0) <= (p.lowStockThreshold || 10));
     const outOfStockCount = products.filter(p => !p.inStock).length;
 
     res.json({
       totalProducts,
-      totalStockValue,
+      totalStockValue: Math.round(totalStockValue * 100) / 100, // optional rounding
       lowStockCount: lowStockItems.length,
       outOfStockCount,
       products,
     });
   } catch (error) {
+    console.error("getAllInventory error:", error);
     res.status(500).json({ message: "Error fetching all inventory", error: error.message });
   }
 };
-
 // Get inventory for a specific seller (admin only)
 const getSellerInventory = async (req, res) => {
   try {
