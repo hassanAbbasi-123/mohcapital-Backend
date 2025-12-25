@@ -27,25 +27,46 @@ const generateOtp = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// Send verification OTP
+// Send verification OTP (NON-BLOCKING & SAFE)
 const sendVerificationOtp = async (user) => {
-  await OTP.deleteMany({ userId: user._id, type: "verification" });
+  try {
+    // Remove old verification OTPs
+    await OTP.deleteMany({ userId: user._id, type: "verification" });
 
-  const otp = generateOtp();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    // Generate OTP
+    const otp = generateOtp();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-  await OTP.create({
-    userId: user._id,
-    token: otp,
-    type: "verification",
-    expiresAt,
-  });
+    // Save OTP
+    await OTP.create({
+      userId: user._id,
+      token: otp,
+      type: "verification",
+      expiresAt,
+    });
 
-  const text = `Your email verification OTP is ${otp}. It is valid for 10 minutes.`;
-  const html = `<p>Your email verification OTP is <strong>${otp}</strong>. It is valid for 10 minutes.</p>`;
+    const text = `Your email verification OTP is ${otp}. It is valid for 10 minutes.`;
+    const html = `
+      <p>Your email verification OTP is <strong>${otp}</strong>.</p>
+      <p>This OTP is valid for <strong>10 minutes</strong>.</p>
+    `;
 
-  await sendEmail(user.email, "Verify Your Email - OTP", text, html);
+    // 🔥 DO NOT BLOCK REGISTRATION IF EMAIL FAILS
+    sendEmail(
+      user.email,
+      "Verify Your Email - OTP",
+      text,
+      html
+    ).catch(err => {
+      console.error("❌ VERIFICATION OTP EMAIL FAILED:", err.message);
+    });
+
+  } catch (err) {
+    // OTP creation errors should be logged, not crash registration
+    console.error("❌ SEND VERIFICATION OTP ERROR:", err.message);
+  }
 };
+
 
 // Send reset OTP
 const sendResetOtp = async (user) => {
@@ -217,7 +238,7 @@ exports.register = async (req, res) => {
       session.endSession();
 
       // Send verification OTP after successful registration
-      await sendVerificationOtp(user);
+       sendVerificationOtp(user);
 
       const payload = {
         message: "Registration successful. Please check your email for the verification OTP.",
