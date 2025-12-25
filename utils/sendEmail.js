@@ -1,37 +1,31 @@
-// utils/sendEmail.js (Updated for Resend API - No SMTP needed)
-const { Resend } = require('resend');
+// utils/sendEmail.js (NEW FILE - Nodemailer setup from scratch)
+const nodemailer = require("nodemailer");
 
-// Initialize Resend with your API key from environment variable
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Create transporter using SMTP (works with Gmail, Brevo, SendGrid, etc. - configure via .env)
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: false, // true for port 465, false for 587 (STARTTLS)
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
 
-// Reusable send email function (signature unchanged - works with your existing calls)
+// Reusable send email function
 const sendEmail = async (to, subject, text, html = null) => {
-  // Use Resend's shared onboarding address for instant testing (no domain verification required)
-  // Later: Verify your own domain in Resend dashboard and change to e.g. "Moh-Capital Overseas <noreply@yourdomain.com>"
-  const from = process.env.FROM_EMAIL || 'Moh-Capital Overseas <onboarding@resend.dev>';
-
-  const emailData = {
-    from,
-    to,          // String for single recipient, or array for multiple
+  const mailOptions = {
+    from: process.env.FROM_EMAIL || `"Moh-Capital Overseas" <${process.env.SMTP_USER}>`,
+    to,
     subject,
-    text,        // Plain text version (required by most providers)
+    text,
   };
 
   if (html) {
-    emailData.html = html; // HTML version if provided
+    mailOptions.html = html;
   }
 
-  // Send the email
-  const { data, error } = await resend.emails.send(emailData);
-
-  if (error) {
-    console.error('Resend email error:', error);
-    throw new Error(error.message || 'Failed to send email');
-  }
-
-  // Optional: Log success for debugging
-  console.log('Email sent successfully:', data.id);
-  return data;
+  await transporter.sendMail(mailOptions);
 };
 
 module.exports = sendEmail;
