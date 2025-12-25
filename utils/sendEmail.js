@@ -1,4 +1,4 @@
-// utils/sendEmail.js (NEW FILE - Nodemailer setup from scratch)
+
 const nodemailer = require("nodemailer");
 
 // Create transporter using SMTP (works with Gmail, Brevo, SendGrid, etc. - configure via .env)
