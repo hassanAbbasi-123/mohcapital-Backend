@@ -394,9 +394,7 @@ const transactionSchema = new mongoose.Schema({
 // Indexes for better performance
 transactionSchema.index({ customer: 1, createdAt: -1 });
 transactionSchema.index({ type: 1 });
-inventorySchema.index({ productId: 1 });
 inventorySchema.index({ category: 1 });
-customerSchema.index({ customerId: 1 });
 customerSchema.index({ phone: 1 });
 stockPurchaseSchema.index({ inventory: 1 });
 
