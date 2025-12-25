@@ -1,31 +1,42 @@
-
 const nodemailer = require("nodemailer");
 
-// Create transporter using SMTP (works with Gmail, Brevo, SendGrid, etc. - configure via .env)
+// Create transporter
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false, // true for port 465, false for 587 (STARTTLS)
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT),
+  secure: Number(process.env.SMTP_PORT) === 465, // auto-handle 465 vs 587
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  tls: {
+    rejectUnauthorized: false, // IMPORTANT for Render / cloud TLS
+  },
+});
+
+// Verify SMTP connection on server start
+transporter.verify((err, success) => {
+  if (err) {
+    console.error("❌ SMTP CONFIG ERROR:", err);
+  } else {
+    console.log("✅ SMTP READY");
+  }
 });
 
 // Reusable send email function
 const sendEmail = async (to, subject, text, html = null) => {
-  const mailOptions = {
-    from: process.env.FROM_EMAIL || `"Moh-Capital Overseas" <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    text,
-  };
-
-  if (html) {
-    mailOptions.html = html;
+  try {
+    await transporter.sendMail({
+      from: `Moh-Capital Overseas <${process.env.FROM_EMAIL || process.env.SMTP_USER}>`,
+      to,
+      subject,
+      text,
+      ...(html && { html }),
+    });
+  } catch (error) {
+    console.error("❌ EMAIL SEND ERROR:", error);
+    throw error; // let route decide whether to fail or ignore
   }
-
-  await transporter.sendMail(mailOptions);
 };
 
 module.exports = sendEmail;
