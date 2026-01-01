@@ -1,4 +1,4 @@
-// routes/authRoutes.js (UPDATED - added new OTP/forgot/reset routes)
+// routes/authRoutes.js (UPDATED - verification OTP routes removed)
 const express = require("express");
 const router = express.Router();
 const { authController } = require("../controllers/indexController");
@@ -7,12 +7,6 @@ const { protect } = require("../middleware/authMiddleware");
 
 // REGISTER (seller + user)
 router.post("/register", authUpload, authController.register);
-
-// VERIFY EMAIL OTP
-router.post("/verify-otp", authController.verifyEmailOtp);
-
-// RESEND VERIFICATION OTP
-router.post("/resend-verification-otp", authController.resendVerificationOtp);
 
 // FORGOT PASSWORD (send reset OTP)
 router.post("/forgot-password", authController.forgotPassword);

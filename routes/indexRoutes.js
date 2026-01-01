@@ -18,7 +18,10 @@ const usermanageRoutes = require("./usermanageRoutes");
 const sellermanageRoutes = require("./sellermanageRoutes");
 const bannerRoutes = require("./bannerRoutes");
 const leadRoutes = require("./leadRoutes");
-const accountRoutes = require("./accountRoutes"); // ✅ New Account routes
+const accountRoutes = require("./accountRoutes"); 
+const partnershipRoutes=require("./partnershipRoutes");
+const contactRoutes=require("./contactRoutes");
+
 
 // Using route modules
 router.use("/auth", authRoutes);
@@ -37,6 +40,8 @@ router.use("/user-management", usermanageRoutes);
 router.use("/seller-management", sellermanageRoutes);
 router.use("/banners", bannerRoutes);
 router.use("/leads", leadRoutes);
-router.use("/accounts", accountRoutes); // ✅ New Account routes
+router.use("/accounts", accountRoutes); 
+router.use("/partnership",partnershipRoutes);
+router.use("/contact",contactRoutes);
 
 module.exports = router;

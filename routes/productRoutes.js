@@ -35,7 +35,7 @@ router.delete(
   isAdmin,
   productController.deleteProduct
 );
-//  Assign coupon to product()
+//  Assign coupon to product
 router.patch(
   "/admin/assign-products-coupons/:id",
   protect,

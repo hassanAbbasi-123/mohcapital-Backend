@@ -1,4 +1,4 @@
-// controllers/authController.js (FULLY UPDATED - no lines skipped, added strong password validation, OTP verification flow, forgot/reset with OTP)
+// controllers/authController.js (UPDATED - email verification OTP flow completely removed)
 const { Customer } = require("../models/accountModel");
 const mongoose = require("mongoose");
 const { User } = require("../models/indexModel"); // Only User is needed now
@@ -9,7 +9,7 @@ const OTP = require("../models/otpModel");
 const sendEmail = require("../utils/sendEmail");
 
 const generateToken = (id, role) => {
-  return jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: "30d" });
+  return jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: "7d" });
 };
 
 // Strong password validation
@@ -26,47 +26,6 @@ const validatePassword = (password) => {
 const generateOtp = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
-
-// Send verification OTP (NON-BLOCKING & SAFE)
-const sendVerificationOtp = async (user) => {
-  try {
-    // Remove old verification OTPs
-    await OTP.deleteMany({ userId: user._id, type: "verification" });
-
-    // Generate OTP
-    const otp = generateOtp();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // Save OTP
-    await OTP.create({
-      userId: user._id,
-      token: otp,
-      type: "verification",
-      expiresAt,
-    });
-
-    const text = `Your email verification OTP is ${otp}. It is valid for 10 minutes.`;
-    const html = `
-      <p>Your email verification OTP is <strong>${otp}</strong>.</p>
-      <p>This OTP is valid for <strong>10 minutes</strong>.</p>
-    `;
-
-    // 🔥 DO NOT BLOCK REGISTRATION IF EMAIL FAILS
-    sendEmail(
-      user.email,
-      "Verify Your Email - OTP",
-      text,
-      html
-    ).catch(err => {
-      console.error("❌ VERIFICATION OTP EMAIL FAILED:", err.message);
-    });
-
-  } catch (err) {
-    // OTP creation errors should be logged, not crash registration
-    console.error("❌ SEND VERIFICATION OTP ERROR:", err.message);
-  }
-};
-
 
 // Send reset OTP
 const sendResetOtp = async (user) => {
@@ -88,7 +47,7 @@ const sendResetOtp = async (user) => {
   await sendEmail(user.email, "Password Reset - OTP", text, html);
 };
 
-// REGISTER (now with OTP verification - account inactive until verified)
+// REGISTER (email verification removed - account active immediately)
 exports.register = async (req, res) => {
   const {
     name,
@@ -133,19 +92,22 @@ exports.register = async (req, res) => {
     if (existingPhone) return res.status(400).json({ message: "Phone already registered" });
 
     if (normalizedRole === "seller") {
-      if (!storeName || !gstin || !city || !state) {
-        return res.status(400).json({ message: "storeName, gstin, city, state required for seller" });
+      if (!storeName || !city || !state) {
+        return res.status(400).json({ message: "storeName, city, state required for seller" });
       }
 
       const existingStore = await User.findOne({ "seller.storeName": storeName });
       if (existingStore) return res.status(400).json({ message: "Store name already taken" });
 
-      const existingGstin = await User.findOne({ "seller.gstin": gstin });
-      if (existingGstin) return res.status(400).json({ message: "GSTIN already registered" });
+      // Check GSTIN only if provided (now optional)
+      if (gstin) {
+        const existingGstin = await User.findOne({ "seller.gstin": gstin });
+        if (existingGstin) return res.status(400).json({ message: "GSTIN already registered" });
 
-      // Also check legacy SellerProfile
-      const legacy = await SellerProfile.findOne({ $or: [{ storeName }, { gstin }] });
-      if (legacy) return res.status(400).json({ message: "Store name or GSTIN already exists in legacy profile" });
+        // Also check legacy SellerProfile
+        const legacy = await SellerProfile.findOne({ gstin });
+        if (legacy) return res.status(400).json({ message: "GSTIN already exists in legacy profile" });
+      }
     }
 
     // Upload logo to Cloudinary
@@ -184,7 +146,7 @@ exports.register = async (req, res) => {
         phone,
         address,
         aadhaar,
-        emailVerified: false // Force false for new registrations
+        emailVerified: true // Immediately verified - no OTP flow
       }], { session }).then(d => d[0]);
 
       if (normalizedRole === "seller") {
@@ -195,7 +157,7 @@ exports.register = async (req, res) => {
           storeName,
           storeDescription: storeDescription || "",
           logo,
-          gstin,
+          gstin: gstin || "",
           pan: pan || "",
           businessType,
           location: {
@@ -207,7 +169,7 @@ exports.register = async (req, res) => {
           },
           kycStatus: "pending",
           documents: kycDocuments.map((url, i) => ({
-            type: documentTypes[i] || "gstin",
+            type: documentTypes[i] || "other",
             url,
             uploadedAt: new Date(),
           })),
@@ -220,13 +182,13 @@ exports.register = async (req, res) => {
           storeName,
           storeDescription: storeDescription || "",
           logo,
-          gstin,
+          gstin: gstin || "",
           pan: pan || "",
           businessType,
           location: { address: address || "", city, state, pincode: pincode || "", district: district || "" },
           kyc: {
             status: "submitted",
-            documents: kycDocuments.map((url, i) => ({ type: documentTypes[i] || "gstin", url }))
+            documents: kycDocuments.map((url, i) => ({ type: documentTypes[i] || "other", url }))
           },
           isVerified: false
         }], { session });
@@ -237,14 +199,14 @@ exports.register = async (req, res) => {
       await session.commitTransaction();
       session.endSession();
 
-      // Send verification OTP after successful registration
-       sendVerificationOtp(user);
+      const token = generateToken(user._id, user.role);
 
       const payload = {
-        message: "Registration successful. Please check your email for the verification OTP.",
+        message: "Registration successful!",
         userId: user._id,
         email: user.email,
         role: user.role,
+        token,
       };
 
       if (normalizedRole === "seller") {
@@ -266,91 +228,7 @@ exports.register = async (req, res) => {
   }
 };
 
-// VERIFY EMAIL OTP (new)
-exports.verifyEmailOtp = async (req, res) => {
-  const { userId, otp } = req.body;
-
-  if (!userId || !otp) {
-    return res.status(400).json({ message: "userId and otp are required" });
-  }
-
-  try {
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    if (user.emailVerified) {
-      return res.status(400).json({ message: "Email already verified" });
-    }
-
-    const otpDoc = await OTP.findOne({
-      userId,
-      type: "verification",
-      expiresAt: { $gt: new Date() },
-    }).sort({ createdAt: -1 });
-
-    if (!otpDoc || !(await otpDoc.compareToken(otp))) {
-      return res.status(400).json({ message: "Invalid or expired OTP" });
-    }
-
-    user.emailVerified = true;
-    await user.save();
-
-    await OTP.deleteMany({ userId, type: "verification" });
-
-    const token = generateToken(user._id, user.role);
-
-    const payload = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      phone: user.phone || null,
-      token,
-    };
-
-    if (user.role === "seller") {
-      payload.seller = {
-        storeName: user.seller.storeName,
-        logo: user.seller.logo || null,
-        kycStatus: user.seller.kycStatus,
-      };
-    }
-
-    return res.json(payload);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-};
-
-// RESEND VERIFICATION OTP (new)
-exports.resendVerificationOtp = async (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ message: "Email is required" });
-  }
-
-  try {
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ message: "Email not found" });
-    }
-
-    if (user.emailVerified) {
-      return res.status(400).json({ message: "Email already verified" });
-    }
-
-    await sendVerificationOtp(user);
-
-    return res.json({ message: "Verification OTP resent successfully" });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-};
-
-// FORGOT PASSWORD - SEND RESET OTP (new)
+// FORGOT PASSWORD - SEND RESET OTP
 exports.forgotPassword = async (req, res) => {
   const { email } = req.body;
 
@@ -371,7 +249,7 @@ exports.forgotPassword = async (req, res) => {
   }
 };
 
-// RESET PASSWORD WITH OTP (new)
+// RESET PASSWORD WITH OTP
 exports.resetPassword = async (req, res) => {
   const { email, otp, newPassword } = req.body;
 
@@ -417,7 +295,7 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// LOGIN (updated with email verification check)
+// LOGIN (email verification check removed)
 exports.login = async (req, res) => {
   const { email, password, customerId } = req.body;
 
@@ -458,16 +336,13 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Email verification check (existing users without field are allowed)
-    if (user.emailVerified === false) {
-      return res.status(403).json({ message: "Please verify your email first" });
-    }
-
     if (user.role === "seller") {
       if (!user.seller?.kycStatus || user.seller.kycStatus !== "approved") {
         return res.status(403).json({ message: "Seller account pending approval" });
       }
     }
+
+    const token = generateToken(user._id, user.role);
 
     return res.json({
       _id: user._id,
@@ -475,14 +350,14 @@ exports.login = async (req, res) => {
       email: user.email,
       role: user.role,
       phone: user.phone || null,
-      token: generateToken(user._id, user.role),
+      token,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
 };
 
-// Approve or Disapprove Seller (Admin only) - kept exactly as original (you can replace with hybrid version if needed)
+// Approve or Disapprove Seller (Admin only)
 exports.approveOrDisapproveSeller = async (req, res) => {
   try {
     if (req.user.role !== "admin") {

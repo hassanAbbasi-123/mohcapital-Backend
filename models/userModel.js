@@ -6,8 +6,8 @@ const sellerSubSchema = new mongoose.Schema({
   storeName: { type: String },
   storeDescription: { type: String },
   logo: { type: String },
-  gstin: { type: String },
-  pan: { type: String },
+  gstin: { type: String }, // Optional
+  pan: { type: String }, // Optional
   businessType: { type: String, enum: ["individual","trader","fpo","cooperative","mill","exporter","processor"], default: "trader" },
   location: {
     address: { type: String },
@@ -33,7 +33,7 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   role: { type: String, enum: ["admin","seller","user"], default: "user" },
   phone: { type: String, unique: true, sparse: true, match: [/^\d{10}$/] },
-  aadhaar: { type: String, match: [/^\d{12}$/], sparse: true },
+  aadhaar: { type: String, match: [/^\d{12}$/], sparse: true }, // Optional
   // Embedded seller data (now fully synced with SellerProfile fields)
   seller: sellerSubSchema,
   isActive: { type: Boolean, default: true },

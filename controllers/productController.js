@@ -1,3 +1,4 @@
+
 // controllers/productController.js
 const {
   productModel: Product,
@@ -8,7 +9,6 @@ const {
 } = require("../models/indexModel");
 const slugify = require("slugify");
 const mongoose = require("mongoose");
-const { uploadToCloudinary } = require("../config/multer"); // Import the Cloudinary upload helper (adjust path if in middleware)
 
 const getSellerConditions = async (userId) => {
   const sellerDoc = await SellerProfile.findOne({ user: userId }).lean();
@@ -33,7 +33,7 @@ const getAllProducts = async (req, res) => {
           select: "name email", // fetch seller's name + email
         },
       })
-      .populate("coupons", "code discountValue discountType isActive expiryDate")
+      .populate("coupons", "code discount")
       .sort({ createdAt: -1 });
 
     res.json(products);
@@ -88,14 +88,8 @@ const rejectProduct = async (req, res) => {
 //  Delete any product
 const deleteProduct = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findByIdAndDelete(req.params.id);
     if (!product) return res.status(404).json({ message: "Product not found" });
-
-    // TODO: Optionally delete images from Cloudinary if public_id is stored in model
-    // e.g., if (product.imagePublicId) cloudinary.uploader.destroy(product.imagePublicId);
-    // For gallery: product.galleryPublicIds.forEach(id => cloudinary.uploader.destroy(id));
-
-    await Product.findByIdAndDelete(req.params.id);
     res.json({ message: "Product deleted by admin" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting product", error: error.message });
@@ -137,271 +131,291 @@ const assignCouponToProduct = async (req, res) => {
       return res.status(400).json({ message: "Coupon not applicable to this category" });
     }
 
-    // Add coupon to product if not already assigned
-    if (!product.coupons.includes(couponId)) {
-      product.coupons.push(couponId);
-      await product.save();
-    }
+    // 3. Attach coupon if valid
+    product.coupons.addToSet(coupon._id);
+    await product.save();
 
-    res.json({ message: "Coupon assigned successfully", product });
+    const updatedProduct = await Product.findById(product._id)
+      .populate("coupons", "code discount isActive expiryDate");
+
+    res.json({ message: "✅ Coupon assigned successfully", product: updatedProduct });
+
   } catch (error) {
     res.status(500).json({ message: "Error assigning coupon", error: error.message });
   }
 };
 
-// Remove coupon from product
+//  Remove coupon from product
 const removeCouponFromProduct = async (req, res) => {
   try {
-    const { couponId } = req.body;
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: "Product not found" });
+    const { id } = req.params; // product id
+    const { couponId } = req.body; // couponId comes from body
 
-    product.coupons.pull(couponId);
-    await product.save();
+    if (!couponId) {
+      return res.status(400).json({ message: "Coupon ID is required" });
+    }
 
-    res.json({ message: "Coupon removed successfully", product });
+    const product = await Product.findByIdAndUpdate(
+      id,
+      { $pull: { coupons: couponId } },
+      { new: true }
+    );
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    res.json({ message: "Coupon removed", product });
   } catch (error) {
-    res.status(500).json({ message: "Error removing coupon", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error removing coupon", error: error.message });
   }
 };
 
-// ==============================
-// SELLER FUNCTIONS
-// ==============================
+//  SELLER FUNCTIONS
 
-// Create product
+//  Create product (seller)
 const createProduct = async (req, res) => {
   try {
-    const {
-      name,
-      description,
-      category,
-      price,
-      originalPrice,
-      discount,
-      quantity,
-      minOrderQuantity,
-      unit,
-      variety,
-      weight,
-      isOrganic,
-      harvestDate,
-      bestBefore,
-      storageInstructions,
-      isSeasonal,
-    } = req.body;
+    let { category, name, slug, description, price, quantity, weight, size } =
+      req.body;
 
-    // Validate required fields
-    if (!name || !category || !price || !unit || !bestBefore) {
-      return res.status(400).json({ message: "Missing required fields" });
+    // ✅ Cover image
+    const image = req.files?.image ? req.files.image[0].path : null;
+
+    // ✅ Gallery images
+    const gallery = req.files?.gallery ? req.files.gallery.map(file => file.path) : [];
+
+    // ✅ Find seller profile for this user
+    const sellerProfile = await SellerProfile.findOne({ user: req.user._id });
+    if (!sellerProfile) {
+      return res.status(400).json({ message: "Seller profile not found" });
     }
 
-    // Validate seller
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const existingProduct = await Product.findOne({
-      name,
-      $or: sellerConditions,
-    });
-    if (existingProduct) {
-      return res.status(400).json({ message: "Product with this name already exists for seller" });
-    }
-
-    // Handle image upload to Cloudinary
-    let image = "";
-    if (req.files?.image?.[0]) {
-      const uploadResult = await uploadToCloudinary(req.files.image[0], req);
-      image = uploadResult.secure_url;
-      // Optionally store public_id: imagePublicId: uploadResult.public_id
-    }
-
-    // Handle gallery uploads to Cloudinary
-    let gallery = [];
-    if (req.files?.gallery) {
-      for (const file of req.files.gallery) {
-        const uploadResult = await uploadToCloudinary(file, req);
-        gallery.push(uploadResult.secure_url);
-        // Optionally: galleryPublicIds.push(uploadResult.public_id)
+    // ✅ Ensure category is ObjectId
+    if (category && typeof category === "string" && !category.match(/^[0-9a-fA-F]{24}$/)) {
+      const foundCategory = await Category.findOne({ name: category });
+      if (!foundCategory) {
+        return res.status(400).json({ message: `Category '${category}' not found` });
       }
+      category = foundCategory._id;
     }
 
-    const product = new Product({
-      name,
-      slug: slugify(name, { lower: true }),
-      description,
+    // ✅ Auto-generate slug if not provided
+    if (!slug && name) {
+      slug = slugify(name, { lower: true, strict: true });
+    }
+
+    const newProduct = new Product({
       category,
-      seller: req.user._id, // or sellerProfile._id if available
-      price: parseFloat(price),
-      originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
-      discount: discount ? parseFloat(discount) : 0,
-      quantity: parseFloat(quantity) || 0,
-      minOrderQuantity: parseFloat(minOrderQuantity) || 0.25,
-      unit,
-      variety,
-      weight: weight ? parseFloat(weight) : undefined,
-      isOrganic: isOrganic === "true",
-      harvestDate: harvestDate ? new Date(harvestDate) : undefined,
-      bestBefore: new Date(bestBefore),
-      storageInstructions,
-      isSeasonal: isSeasonal === "true",
+      seller: sellerProfile._id, // ✅ SellerProfile reference
+      name,
+      slug,
+      description,
+      price,
+      quantity,
+      weight,
+      size,
       image,
       gallery,
-      inStock: true,
-      status: "pending", // Awaits admin approval
+      status: "pending", // 🔴 Force pending until admin approves
     });
 
-    await product.save();
-    res.status(201).json({ message: "Product created successfully", product });
+    const savedProduct = await newProduct.save();
+
+    res.status(201).json({
+      message: "✅ Product created successfully, awaiting admin approval",
+      product: savedProduct,
+    });
   } catch (error) {
-    console.error("Error creating product:", error);
+    console.error("❌ Error creating product:", error);
     res.status(500).json({ message: "Error creating product", error: error.message });
   }
 };
 
-// Update own product
+//  Update own product
 const updateOwnProduct = async (req, res) => {
   try {
-    const { id } = req.params;
-    const updates = req.body;
+    const conditions = await getSellerConditions(req.user._id);
 
-    // Validate seller ownership
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const product = await Product.findOne({ _id: id, $or: sellerConditions });
-    if (!product) {
-      return res.status(404).json({ message: "Product not found or not owned by seller" });
-    }
-
-    // Handle new image upload (replace)
-    if (req.files?.image?.[0]) {
-      // TODO: Delete old image from Cloudinary if public_id stored
-      const uploadResult = await uploadToCloudinary(req.files.image[0], req);
-      updates.image = uploadResult.secure_url;
-      // updates.imagePublicId = uploadResult.public_id;
-    }
-
-    // Handle new gallery uploads (append or replace)
-    if (req.files?.gallery) {
-      const newGalleryUrls = [];
-      // TODO: If replacing, clear old galleryPublicIds
-      for (const file of req.files.gallery) {
-        const uploadResult = await uploadToCloudinary(file, req);
-        newGalleryUrls.push(uploadResult.secure_url);
-        // newGalleryPublicIds.push(uploadResult.public_id);
-      }
-      // Append to existing gallery
-      product.gallery = [...product.gallery, ...newGalleryUrls];
-      // Or replace: product.gallery = newGalleryUrls;
-    }
-
-    // Update other fields (with validation)
-    const allowedFields = [
-      "name", "description", "category", "price", "originalPrice", "discount",
-      "quantity", "minOrderQuantity", "unit", "variety", "weight",
-      "isOrganic", "harvestDate", "bestBefore", "storageInstructions",
-      "isSeasonal"
-    ];
-    allowedFields.forEach(field => {
-      if (updates[field] !== undefined) {
-        if (["price", "originalPrice", "discount", "quantity", "minOrderQuantity", "weight"].includes(field)) {
-          product[field] = parseFloat(updates[field]);
-        } else if (["isOrganic", "isSeasonal"].includes(field)) {
-          product[field] = updates[field] === "true";
-        } else if (["harvestDate", "bestBefore"].includes(field)) {
-          product[field] = new Date(updates[field]);
-        } else {
-          product[field] = updates[field];
-        }
-      }
+    const product = await Product.findOne({
+      _id: req.params.id,
+      $or: conditions,
     });
 
-    // Regenerate slug if name changed
-    if (updates.name) {
-      product.slug = slugify(updates.name, { lower: true });
+    if (!product) {
+      return res.status(404).json({ message: "Product not found or not yours" });
     }
 
-    await product.save();
-    res.json({ message: "Product updated successfully", product });
+    // ✅ Handle file uploads
+    if (req.files?.image) req.body.image = req.files.image[0].path;
+    if (req.files?.gallery) req.body.gallery = req.files.gallery.map(f => f.path);
+
+    // ✅ Merge updates
+    Object.assign(product, req.body);
+
+    const updatedProduct = await product.save();
+    res.json(updatedProduct);
   } catch (error) {
-    console.error("Error updating product:", error);
     res.status(500).json({ message: "Error updating product", error: error.message });
   }
 };
 
-// Delete own product
+//  Delete own product
 const deleteOwnProduct = async (req, res) => {
   try {
-    const { id } = req.params;
+    const userId = req.user._id;
 
-    // Validate seller ownership
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const product = await Product.findOne({ _id: id, $or: sellerConditions });
+    // Find seller profile for this user
+    const sellerDoc = await SellerProfile.findOne({ user: userId }).lean();
+    const sellerId = sellerDoc?._id;
+
+    // Match product by either sellerId or userId (backward compatibility)
+    const product = await Product.findOneAndDelete({
+      _id: req.params.id,
+      $or: [
+        { seller: sellerId },
+        { seller: userId }, // in case some products still have userId directly
+      ],
+    });
+
     if (!product) {
-      return res.status(404).json({ message: "Product not found or not owned by seller" });
+      return res.status(404).json({ message: "Product not found or not yours" });
     }
 
-    // TODO: Delete images from Cloudinary if public_id stored
-    // e.g., if (product.imagePublicId) cloudinary.uploader.destroy(product.imagePublicId);
-    // product.galleryPublicIds.forEach(id => cloudinary.uploader.destroy(id));
-
-    await Product.findByIdAndDelete(id);
-    res.json({ message: "Product deleted successfully" });
+    res.json({ message: "Product deleted successfully", product });
   } catch (error) {
     res.status(500).json({ message: "Error deleting product", error: error.message });
   }
 };
 
-// Toggle stock
+//  Toggle stock
 const toggleStock = async (req, res) => {
   try {
-    const { id } = req.params;
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const product = await Product.findOne({ _id: id, $or: sellerConditions });
-    if (!product) return res.status(404).json({ message: "Product not found" });
+    const conditions = await getSellerConditions(req.user._id);
+
+    const product = await Product.findOne({
+      _id: req.params.id,
+      $or: conditions,
+    });
+
+    if (!product) return res.status(404).json({ message: "Product not found or not yours" });
 
     product.inStock = !product.inStock;
     await product.save();
-    res.json({ message: `Product ${product.inStock ? "in stock" : "out of stock"}`, product });
+    res.json({ message: "Stock toggled", product });
   } catch (error) {
     res.status(500).json({ message: "Error toggling stock", error: error.message });
   }
 };
 
-// Toggle sale
+//  Toggle sale
 const toggleSale = async (req, res) => {
   try {
-    const { id } = req.params;
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const product = await Product.findOne({ _id: id, $or: sellerConditions });
-    if (!product) return res.status(404).json({ message: "Product not found" });
+    const conditions = await getSellerConditions(req.user._id);
+
+    const product = await Product.findOne({
+      _id: req.params.id,
+      $or: conditions,
+    });
+
+    if (!product) return res.status(404).json({ message: "Product not found or not yours" });
 
     product.isOnSale = !product.isOnSale;
     await product.save();
-    res.json({ message: `Product ${product.isOnSale ? "on sale" : "off sale"}`, product });
+    res.json({ message: "Sale toggled", product });
   } catch (error) {
     res.status(500).json({ message: "Error toggling sale", error: error.message });
   }
 };
 
-// Apply coupon (seller version, similar to admin)
+//  Apply coupon to own product
 const applyCoupon = async (req, res) => {
   try {
     const { couponId } = req.body;
-    const { id } = req.params; // product id
 
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const product = await Product.findOne({ _id: id, $or: sellerConditions });
+    // 1. Find the coupon
+    const coupon = await Coupon.findById(couponId);
+    if (!coupon) return res.status(404).json({ message: "Coupon not found" });
+
+    // 2. Check if coupon is active
+    if (!coupon.isActive) {
+      return res.status(400).json({ message: "Coupon is not active" });
+    }
+
+    // 3. Check expiry date
+    if (coupon.expiryDate && coupon.expiryDate < new Date()) {
+      return res.status(400).json({ message: "Coupon has expired" });
+    }
+
+    // 4. Check usage limits
+    if (coupon.maxUsage && coupon.usedCount >= coupon.maxUsage) {
+      return res.status(400).json({ message: "Coupon usage limit reached" });
+    }
+
+    // 5. Check if user already used this coupon
+    const alreadyUsed = coupon.userUsage.some(
+      (u) => u.user.toString() === req.user._id.toString()
+    );
+    if (alreadyUsed) {
+      return res.status(400).json({ message: "You already used this coupon" });
+    }
+
+    // 6. Find the product
+    let product = await Product.findOne({ _id: req.params.id, seller: req.user._id });
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    const coupon = await Coupon.findById(couponId);
-    if (!coupon || !coupon.isActive) {
-      return res.status(400).json({ message: "Invalid or inactive coupon" });
+    // 7. Check product/category restrictions
+    if (
+      coupon.applicableProducts.length &&
+      !coupon.applicableProducts.includes(product._id)
+    ) {
+      return res.status(400).json({ message: "This coupon is not valid for this product" });
     }
 
-    if (!product.coupons.includes(couponId)) {
-      product.coupons.push(couponId);
-      await product.save();
+    if (
+      coupon.applicableCategories.length &&
+      !coupon.applicableCategories.includes(product.category)
+    ) {
+      return res.status(400).json({ message: "This coupon is not valid for this category" });
     }
 
-    res.json({ message: "Coupon applied successfully", product });
+    // 8. Save originalPrice if not already saved
+    if (!product.originalPrice) {
+      product.originalPrice = product.price;
+    }
+
+    // 9. Apply discount
+    if (coupon.discountType === "percentage") {
+      let discountAmount = (product.originalPrice * coupon.discountValue) / 100;
+
+      // apply maxDiscount cap if exists
+      if (coupon.maxDiscount && discountAmount > coupon.maxDiscount) {
+        discountAmount = coupon.maxDiscount;
+      }
+
+      product.price = product.originalPrice - discountAmount;
+    } else if (coupon.discountType === "fixed") {
+      product.price = product.originalPrice - coupon.discountValue;
+    }
+
+    // 10. Attach coupon reference
+    if (!product.coupons.includes(coupon._id)) {
+      product.coupons.push(coupon._id);
+    }
+
+    // 11. Update coupon usage
+    coupon.usedCount += 1;
+    coupon.userUsage.push({ user: req.user._id });
+    await coupon.save();
+
+    await product.save();
+
+    // 12. Return updated product
+    product = await product.populate("coupons", "code discountValue discountType");
+
+    res.json({ message: "Coupon applied", product });
   } catch (error) {
     res.status(500).json({ message: "Error applying coupon", error: error.message });
   }
@@ -410,84 +424,61 @@ const applyCoupon = async (req, res) => {
 // Get my products
 const getMyProducts = async (req, res) => {
   try {
-    const sellerConditions = await getSellerConditions(req.user._id);
-    const products = await Product.find({ $or: sellerConditions })
-      .populate("category", "name slug")
-      .populate("coupons", "code discountValue discountType isActive expiryDate")
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized: no userId in req.user" });
+    }
+
+    // ✅ Use SellerProfile instead of undefined Seller
+    const sellerDoc = await SellerProfile.findOne({ user: userId }).lean();
+    const sellerId = sellerDoc?._id;
+
+    // Build query conditions
+    const conditions = [{ createdBy: userId }, { user: userId }];
+    if (sellerId) {
+      conditions.push({ seller: sellerId }); // ✅ matches your new product docs
+    } else {
+      conditions.push({ seller: userId }); // fallback for older products
+    }
+
+    const products = await Product.find({ $or: conditions })
+      .populate("category")
       .sort({ createdAt: -1 });
 
     res.json(products);
   } catch (error) {
-    res.status(500).json({ message: "Error fetching products", error: error.message });
+    console.error("❌ Error in getMyProducts:", error);
+    res.status(500).json({
+      message: "Error fetching seller products",
+      error: error.message,
+    });
   }
 };
 
-// ==============================
 // USER FUNCTIONS
-// ==============================
-
-// Get approved products with filters
+// Modified getApprovedProducts to support search
 const getApprovedProducts = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 12,
-      category,
-      minPrice,
-      maxPrice,
-      unit,
-      variety,
-      isOrganic,
-      isOnSale,
-      isSeasonal,
-      search,
-    } = req.query;
+    const { category, minPrice, maxPrice, search } = req.query;
+    let filter = { status: "approved" };
 
-    let filter = { status: "approved", inStock: true };
     if (category) filter.category = category;
-    if (minPrice) filter.price = { ...filter.price, $gte: parseFloat(minPrice) };
-    if (maxPrice) filter.price = { ...filter.price, $lte: parseFloat(maxPrice) };
-    if (isOrganic === "true") filter.isOrganic = true;
-    if (isOnSale === "true") filter.isOnSale = true;
-    if (isSeasonal === "true") filter.isSeasonal = true;
-    if (unit) filter.unit = unit;
-    if (variety) filter.variety = { $regex: variety, $options: "i" };
-
+    if (minPrice || maxPrice)
+      filter.price = { $gte: Number(minPrice) || 0, $lte: Number(maxPrice) || Infinity };
     if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { variety: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } }
-      ];
+      filter.name = { $regex: search, $options: "i" };
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const total = await Product.countDocuments(filter);
-
     const products = await Product.find(filter)
-      .populate("category", "name slug")
-      .populate({
-        path: "seller",
-        populate: { path: "user", select: "name email" }
-      })
-      .populate("coupons", "code discountValue discountType isActive expiryDate")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
+      .populate("category seller")
+      .limit(10);
 
     // Optional personalization (silent for guests)
     if (req.user) {
       // e.g., add wishlist or personalized tags later
     }
 
-    res.json({
-      products,
-      pagination: {
-        current: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-        total
-      }
-    });
+    res.json(products);
   } catch (error) {
     res.status(500).json({ message: "Error fetching products", error: error.message });
   }
@@ -497,12 +488,7 @@ const getApprovedProducts = async (req, res) => {
 const getProductBySlug = async (req, res) => {
   try {
     const product = await Product.findOne({ slug: req.params.slug, status: "approved" })
-      .populate({
-        path: "seller",
-        populate: { path: "user", select: "name email" }
-      })
-      .populate("category", "name slug")
-      .populate("coupons", "code discountValue discountType isActive expiryDate");
+      .populate("category seller coupons");
     if (!product) return res.status(404).json({ message: "Product not found" });
     res.json(product);
   } catch (error) {
@@ -552,12 +538,7 @@ const addReview = async (req, res) => {
 //  Get wishlist (liked products)
 const getWishlist = async (req, res) => {
   try {
-    const products = await Product.find({ likes: req.user._id })
-      .populate("category", "name slug")
-      .populate({
-        path: "seller",
-        populate: { path: "user", select: "name email" }
-      });
+    const products = await Product.find({ likes: req.user._id });
     res.json(products);
   } catch (error) {
     res.status(500).json({ message: "Error fetching wishlist", error: error.message });

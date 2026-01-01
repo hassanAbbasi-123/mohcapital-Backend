@@ -48,11 +48,11 @@ exports.uploadPaymentProof = async (req, res) => {
     console.log("=== PAYMENT PROOF UPLOAD START ===");
     console.log("🔄 Uploading payment screenshot for purchase:", req.params.purchaseId);
     console.log("👤 User ID:", req.user._id);
-    
+
     if (req.user.role !== "seller") {
-      return res.status(403).json({ 
-        success: false, 
-        message: "Seller access required" 
+      return res.status(403).json({
+        success: false,
+        message: "Seller access required"
       });
     }
 
@@ -134,7 +134,7 @@ exports.uploadPaymentProof = async (req, res) => {
     // ✅ Upload to Cloudinary
     const uploadResult = await uploadToCloudinary(req.file, req);
     const paymentProofUrl = uploadResult.secure_url;
-    
+
     console.log("📸 Generated payment proof URL:", paymentProofUrl);
 
     // Update purchase with payment details
@@ -161,10 +161,10 @@ exports.uploadPaymentProof = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Error in uploadPaymentProof:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Failed to upload payment proof", 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload payment proof",
+      error: error.message
     });
   }
 };
@@ -793,52 +793,104 @@ exports.verifyRazorpayPayment = async (req, res) => {
 // ── Create Conversation for Purchase ─────────────────────
 exports.createConversationForPurchase = async (purchase) => {
   try {
+    console.log("💬 Starting createConversationForPurchase...");
+    console.log("📦 Purchase ID:", purchase._id);
+
+    // Ensure we have a populated purchase
     const populatedPurchase = await LeadPurchase.findById(purchase._id)
-      .populate("lead")
-      .populate("seller")
-      .populate("lead.buyer");
+      .populate({
+        path: "lead",
+        populate: {
+          path: "buyer",
+          select: "name email"
+        }
+      })
+      .populate("seller", "name email");
+
+    if (!populatedPurchase) {
+      throw new Error("Purchase not found");
+    }
 
     const { lead, seller } = populatedPurchase;
 
-    // Create conversation between buyer and seller
-    let conversation = await Conversation.findOne({
-      participants: { $all: [lead.buyer._id, seller._id] },
-      lead: lead._id
-    });
-
-    if (!conversation) {
-      conversation = new Conversation({
-        buyer: lead.buyer._id,
-        seller: seller._id,
-        participants: [lead.buyer._id, seller._id],
-        lead: lead._id
+    if (!lead || !lead.buyer || !seller) {
+      console.error("❌ Missing required data:", {
+        hasLead: !!lead,
+        hasBuyer: !!(lead?.buyer),
+        hasSeller: !!seller
       });
-      await conversation.save();
+      throw new Error("Missing lead, buyer, or seller data");
     }
 
-    // Create system message
+    console.log("👥 Participants:", {
+      buyerId: lead.buyer._id,
+      buyerName: lead.buyer.name,
+      sellerId: seller._id,
+      sellerName: seller.name
+    });
+
+    // Check if conversation already exists
+    let conversation = await Conversation.findOne({
+      lead: lead._id,
+      participants: { $all: [lead.buyer._id, seller._id] }
+    });
+
+    console.log("🔍 Existing conversation found:", !!conversation);
+
+    if (!conversation) {
+      // Create new conversation
+      conversation = new Conversation({
+        lead: lead._id,
+        participants: [lead.buyer._id, seller._id],
+        initiatedBy: seller._id,
+        lastMessage: "🎉 Payment verified! Let's discuss the lead details.",
+        lastMessageAt: new Date()
+      });
+
+      await conversation.save();
+      console.log("✅ New conversation created:", conversation._id);
+    } else {
+      console.log("✅ Using existing conversation:", conversation._id);
+    }
+
+    // Create initial system message
     const systemMessage = new Message({
       conversation: conversation._id,
-      sender: seller._id, // Seller as sender for system message
-      type: "system",
-      text: `🎉 Lead purchase completed! Seller ${seller.name} has purchased your lead for ${lead.product}. You can now communicate directly.`
+      sender: seller._id,
+      text: `🎉 Payment verified! Hello ${lead.buyer.name}, I'm interested in your lead for "${lead.product}". Let's discuss the details.`,
+      isSystem: true,
+      type: "system"
     });
+
     await systemMessage.save();
+    console.log("✅ System message created:", systemMessage._id);
 
     // If buyer allowed contact sharing, send contact details
-    if (lead.allow_sellers_contact) {
+    if (lead.allow_sellers_contact && lead.buyer_contact_phone && lead.buyer_contact_email) {
+      console.log("📞 Creating contact details message...");
       const contactMessage = new Message({
         conversation: conversation._id,
         sender: seller._id,
-        type: "system",
-        text: `📞 Buyer Contact Details:\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`
+        text: `📞 **Buyer Contact Details**\nName: ${lead.buyer.name}\nPhone: ${lead.buyer_contact_phone}\nEmail: ${lead.buyer_contact_email}`,
+        isSystem: true,
+        type: "system"
       });
+
       await contactMessage.save();
+      console.log("✅ Contact message created");
     }
 
+    // Update conversation's last message
+    conversation.lastMessage = systemMessage.text;
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+
+    console.log("✅ Conversation fully created and updated");
+
     return conversation;
+
   } catch (error) {
-    console.error("❌ Error creating conversation:", error);
+    console.error("❌ Error in createConversationForPurchase:", error);
     throw error;
   }
 };
@@ -915,14 +967,30 @@ exports.verifyPayment = async (req, res) => {
 
     console.log("🔄 Verify payment request:", { purchaseId, admin: req.user._id });
 
+    // Find purchase with proper population
     const purchase = await LeadPurchase.findById(purchaseId)
-      .populate("lead")
-      .populate("seller")
-      .populate("lead.buyer");
+      .populate({
+        path: "lead",
+        populate: {
+          path: "buyer",
+          select: "name email"
+        }
+      })
+      .populate("seller", "name email");
 
     if (!purchase) {
       return res.status(404).json({ success: false, message: "Purchase not found" });
     }
+
+    console.log("📦 Purchase data:", {
+      purchaseId: purchase._id,
+      leadId: purchase.lead?._id,
+      leadProduct: purchase.lead?.product,
+      buyerId: purchase.lead?.buyer?._id,
+      buyerName: purchase.lead?.buyer?.name,
+      sellerId: purchase.seller?._id,
+      sellerName: purchase.seller?.name
+    });
 
     if (purchase.payment_status === "approved") {
       return res.status(400).json({ success: false, message: "Payment already approved" });
@@ -942,24 +1010,44 @@ exports.verifyPayment = async (req, res) => {
     purchase.approved_at = new Date();
     await purchase.save();
 
+    console.log("✅ Payment status updated to approved");
+
     // Update lead sold count
-    const lead = purchase.lead;
+    const lead = await Lead.findById(purchase.lead._id);
+    if (!lead) {
+      throw new Error("Lead not found");
+    }
+
     lead.sold_count += 1;
     if (lead.sold_count >= lead.max_sellers) {
       lead.status = "sold";
     }
     await lead.save();
 
-    // Create conversation
-    const conversation = await this.createConversationForPurchase(purchase);
+    console.log("✅ Lead sold count updated");
+
+    // Create conversation using the fixed function
+    let conversation;
+    try {
+      console.log("💬 Creating conversation for purchase...");
+      conversation = await this.createConversationForPurchase(purchase);
+      console.log("✅ Conversation created successfully");
+    } catch (convError) {
+      console.error("❌ Conversation creation failed:", convError);
+      // Still proceed with payment verification
+      conversation = null;
+    }
 
     res.json({
       success: true,
       message: "Payment verified successfully! Chat created between buyer and seller.",
-      conversation_id: conversation._id,
+      conversation_id: conversation ? conversation._id : null,
       contact_shared: lead.allow_sellers_contact,
-      payment_mode: purchase.payment_mode
+      lead_product: lead.product,
+      buyer_name: lead.buyer?.name || "Buyer",
+      seller_name: purchase.seller?.name || "Seller"
     });
+
   } catch (error) {
     console.error("❌ Error in verifyPayment:", error);
     res.status(500).json({
